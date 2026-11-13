@@ -883,6 +883,11 @@ def _salvage_partial_response(e: Exception, partial: str, placeholder, context: 
 
 # === ERORI AI — mesaje prietenoase pentru elevi, detalii tehnice doar în log ===
 
+def _request_retry():
+    """Callback pentru butoanele „Reîncercați răspunsul” (vezi handler-ul _pending_retry)."""
+    st.session_state["_pending_retry"] = True
+
+
 def _show_ai_error(e: Exception, context: str = "") -> str:
     """Loghează excepția pe server și arată un mesaj prietenos. Returnează categoria erorii."""
     _log(f"[AI] eroare{' (' + context + ')' if context else ''}", "silent", e)
@@ -4885,9 +4890,12 @@ def run_homework_ui():
                     st.text(st.session_state.get("hw_text", ""))
 
         with tab_text:
+            # Valoarea se pune prin session_state (nu și prin value=), altfel Streamlit afișează
+            # avertismentul „created with a default value but also had its value set via Session State”.
+            if "hw_text_input" not in st.session_state:
+                st.session_state["hw_text_input"] = st.session_state.get("hw_text", "")
             hw_text = st.text_area(
                 "Lipește sau scrie textul temei:",
-                value=st.session_state.get("hw_text", ""),
                 height=300,
                 placeholder="Scrie sau lipește tema aici...",
                 key="hw_text_input"
@@ -6420,7 +6428,7 @@ with st.sidebar:
 
     # Chei exacte per mod — actualizați când adăugați chei noi în fiecare mod
     _HW_KEYS = [
-        "homework_mode", "hw_materie", "hw_text", "hw_corectare",
+        "homework_mode", "hw_materie", "hw_text", "hw_text_input", "hw_corectare",
         "hw_done", "hw_from_photo", "hw_ocr_done",
     ]
     _QUIZ_KEYS = [
@@ -6853,9 +6861,10 @@ if st.session_state.get("_quick_action"):
                     _is_key_err = any(x in str(e) for x in ["epuizat", "invalide", "quota", "429", "API key"])
                     if _is_key_err:
                         _show_ai_error(e, "acțiune rapidă")
-                        if st.button("🔄 Reîncercați răspunsul", key="_retry_quick_action", type="primary"):
-                            st.session_state["_pending_retry"] = True
-                            st.rerun()
+                        # on_click: butonul nu mai e randat la rerun-ul de după click (blocul e one-shot),
+                        # deci un `if st.button(...)` nu s-ar declanșa niciodată; callback-ul rulează oricum.
+                        st.button("🔄 Reîncercați răspunsul", key="_retry_quick_action", type="primary",
+                                  on_click=_request_retry)
                     else:
                         _show_ai_error(e, "acțiune rapidă")
     st.stop()
@@ -6955,9 +6964,10 @@ if st.session_state.get("_suggested_question"):
                 _is_key_err = any(x in str(e) for x in ["epuizat", "invalide", "quota", "429", "API key"])
                 if _is_key_err:
                     _show_ai_error(e, "întrebare sugerată")
-                    if st.button("🔄 Reîncercați răspunsul", key="_retry_suggested", type="primary"):
-                        st.session_state["_pending_retry"] = True
-                        st.rerun()
+                    # on_click: butonul nu mai e randat la rerun-ul de după click (blocul e one-shot),
+                    # deci un `if st.button(...)` nu s-ar declanșa niciodată; callback-ul rulează oricum.
+                    st.button("🔄 Reîncercați răspunsul", key="_retry_suggested", type="primary",
+                              on_click=_request_retry)
                 else:
                     _show_ai_error(e, "întrebare sugerată")
     # IMPORTANT: la eroare NU facem rerun — altfel mesajul de eroare dispare imediat
@@ -7773,8 +7783,9 @@ if user_input := st.chat_input("Întreabă profesorul..."):
                     _is_key_err = any(x in err_str for x in ["epuizat", "invalide", "quota", "429", "API key"])
                     if _is_key_err:
                         _show_ai_error(e, "chat")
-                        if st.button("🔄 Reîncercați răspunsul", key="_retry_after_key_error", type="primary"):
-                            st.session_state["_pending_retry"] = True
-                            st.rerun()
+                        # on_click: butonul nu mai e randat la rerun-ul de după click (blocul e one-shot),
+                        # deci un `if st.button(...)` nu s-ar declanșa niciodată; callback-ul rulează oricum.
+                        st.button("🔄 Reîncercați răspunsul", key="_retry_after_key_error", type="primary",
+                                  on_click=_request_retry)
                     else:
                         _show_ai_error(e, "chat")
