@@ -810,15 +810,27 @@ def enforce_rate_limit(cost: int = 1, burst: bool = True) -> bool:
 
 
 def _build_attachment_payload(media_content, text_file_content) -> list:
-    """Părțile de payload pentru fișierul atașat (imagine/PDF = Google File; text = injectat în prompt)."""
+    """Părțile de payload pentru fișierele atașate.
+
+    media_content: un Google File sau o LISTĂ de Google Files (imagini/PDF), trimise ca atare.
+    text_file_content: textul extras din fișierele text (txt/docx/dbf/srt), injectat în prompt;
+    când sunt mai multe fișiere text, fiecare are deja antetul „=== FIȘIER: nume ===”.
+    """
     final_payload = []
-    if media_content:
-        # Prompt contextual bazat pe tipul fișierului încărcat
-        # FIX: uploaded_file poate fi out-of-scope — citim din session_state
-        _uf = st.session_state.get("_current_uploaded_file_meta", {})
-        fname = _uf.get("name", "")
-        ftype = _uf.get("type", "") or ""
-        if ftype.startswith("image/"):
+    _uf = st.session_state.get("_current_uploaded_file_meta", {}) or {}
+    _metas = _uf.get("files") or ([_uf] if _uf else [])
+    _media = (media_content if isinstance(media_content, list) else [media_content]) if media_content else []
+    _multi = len(_metas) > 1
+
+    if _media:
+        if _multi:
+            _names = ", ".join(f"'{m.get('name', '')}'" for m in _metas)
+            final_payload.append(
+                f"Studentul ți-a trimis {len(_metas)} fișiere: {_names}. Analizează-le pe TOATE "
+                "(imaginile vizual complet, documentele integral), ține cont de legăturile dintre ele "
+                "și precizează la ce fișier te referi când răspunzi."
+            )
+        elif (_uf.get("type") or "").startswith("image/"):
             final_payload.append(
                 "Studentul ți-a trimis o imagine. Analizează-o vizual complet: "
                 "descrie ce vezi (obiecte, persoane, text, culori, forme, diagrame, exerciții scrise de mână) "
@@ -826,29 +838,35 @@ def _build_attachment_payload(media_content, text_file_content) -> list:
             )
         else:
             final_payload.append(
-                f"Studentul ți-a trimis documentul '{fname}'. "
+                f"Studentul ți-a trimis documentul '{_uf.get('name', '')}'. "
                 "Citește și analizează tot conținutul înainte de a răspunde."
             )
-        final_payload.append(media_content)
-    elif text_file_content:
-        # Fișier text (txt/docx/doc/dbf/srt) — injectăm conținutul direct în prompt
-        _uf = st.session_state.get("_current_uploaded_file_meta", {})
-        fname = _uf.get("name", "")
-        fname_lower = fname.lower()
-        if fname_lower.endswith(".srt"):
-            file_desc = "un fișier de subtitrare (.srt)"
-        elif fname_lower.endswith((".docx", ".doc")):
-            file_desc = "un document Word"
-        elif fname_lower.endswith(".dbf"):
-            file_desc = "o bază de date DBF"
+        final_payload.extend(_media)
+
+    if text_file_content:
+        if _multi:
+            final_payload.append(
+                "Conținutul fișierelor text atașate (fiecare are numele în antet):\n\n"
+                f"--- ÎNCEPUT FIȘIERE ---\n{text_file_content}\n--- SFÂRȘIT FIȘIERE ---\n\n"
+                "Analizează conținutul de mai sus și răspunde la întrebarea studentului."
+            )
         else:
-            file_desc = "un fișier text"
-        final_payload.append(
-            f"Studentul ți-a trimis {file_desc} cu numele '{fname}'. "
-            f"Conținutul complet al fișierului este:\n\n"
-            f"--- ÎNCEPUT FIȘIER ---\n{text_file_content}\n--- SFÂRȘIT FIȘIER ---\n\n"
-            f"Analizează conținutul de mai sus și răspunde la întrebarea studentului."
-        )
+            fname = _uf.get("name", "")
+            fname_lower = fname.lower()
+            if fname_lower.endswith(".srt"):
+                file_desc = "un fișier de subtitrare (.srt)"
+            elif fname_lower.endswith((".docx", ".doc")):
+                file_desc = "un document Word"
+            elif fname_lower.endswith(".dbf"):
+                file_desc = "o bază de date DBF"
+            else:
+                file_desc = "un fișier text"
+            final_payload.append(
+                f"Studentul ți-a trimis {file_desc} cu numele '{fname}'. "
+                f"Conținutul complet al fișierului este:\n\n"
+                f"--- ÎNCEPUT FIȘIER ---\n{text_file_content}\n--- SFÂRȘIT FIȘIER ---\n\n"
+                f"Analizează conținutul de mai sus și răspunde la întrebarea studentului."
+            )
     return final_payload
 
 
@@ -6098,6 +6116,69 @@ def run_chat_with_rotation(history_obj, payload, system_prompt=None, live_stream
     raise Exception(friendly_msg)
 
 
+MAX_UPLOAD_FILES = 10
+
+
+def _get_or_upload_gfile(uploaded_file):
+    """Google File pentru o imagine/PDF: din cache (dacă e încă valid) sau urcat acum. None la eroare."""
+    file_key = f"_gfile_{uploaded_file.name}_{uploaded_file.size}"
+    cached_gf = st.session_state.get(file_key)
+    if cached_gf:
+        try:
+            gemini_client = genai.Client(api_key=keys[st.session_state.key_index])
+            refreshed = gemini_client.files.get(name=cached_gf.name)
+            if _is_gfile_active(refreshed) or getattr(refreshed.state, "name", "") == "PROCESSING" \
+                    or str(refreshed.state) in ("FileState.PROCESSING", "PROCESSING"):
+                return refreshed
+        except Exception:
+            pass   # expirat pe Google (TTL 48h) sau altă cheie/proiect → îl re-urcăm
+        st.session_state.pop(file_key, None)
+
+    file_type = uploaded_file.type or "application/octet-stream"
+    suffix = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+              "image/gif": ".gif", "application/pdf": ".pdf"}.get(file_type, ".bin")
+    spinner_text = (f"🖼️ Se trimite imaginea {uploaded_file.name}..." if file_type.startswith("image/")
+                    else f"📚 Se trimite documentul {uploaded_file.name}...")
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(uploaded_file.getvalue())
+            tmp_path = tmp.name
+        gemini_client = genai.Client(api_key=keys[st.session_state.key_index])
+        with st.spinner(spinner_text):
+            gfile = gemini_client.files.upload(file=tmp_path, config=genai_types.UploadFileConfig(mime_type=file_type))
+            poll = 0
+            while str(gfile.state) in ("FileState.PROCESSING", "PROCESSING") and poll < 60:
+                time.sleep(1)
+                gfile = gemini_client.files.get(name=gfile.name)
+                poll += 1
+        if _is_gfile_active(gfile):
+            st.session_state[file_key] = gfile
+            return gfile
+        st.error(f"❌ {uploaded_file.name} nu a putut fi procesat "
+                 f"(stare: {getattr(gfile.state, 'name', str(gfile.state))})")
+    except Exception as e:
+        _log("Eroare la încărcarea fișierului", "silent", e)
+        st.error(f"❌ {uploaded_file.name} nu a putut fi încărcat. Verifică formatul și dimensiunea.")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    return None
+
+
+def _remove_attached_file(name: str, size: int, is_media: bool):
+    """Callback „🗑️”: scoate un fișier din atașamente (și îl șterge de pe Google, dacă e imagine/PDF)."""
+    fid = f"{name}_{size}"
+    st.session_state.setdefault("_removed_file_keys", set()).add(fid)
+    st.session_state.pop(f"_txtcache_{fid}", None)
+    gf = st.session_state.pop(f"_gfile_{fid}", None) if is_media else None
+    if gf:
+        try:
+            genai.Client(api_key=keys[st.session_state.key_index]).files.delete(name=gf.name)
+        except Exception as _e:
+            _log(f"Nu s-a putut șterge fișierul Google Files API: {_e}", "silent")
+
+
 # === UI PRINCIPAL ===
 st.title("🎓 Profesor ETTI")
 
@@ -6758,213 +6839,113 @@ with st.sidebar:
 
     st.header("📁 Materiale")
 
-    # Tipuri de fișiere acceptate — imagini + documente + fișiere text
-    # FIX PERSISTENȚĂ FIȘIER: key fix — widgetul își păstrează valoarea peste
-    # rerun-uri programatice (ex: schimbare materie, toggle mod) declanșate de
-    # alte widget-uri din formular. Fără key, Streamlit putea reseta fișierul
-    # la None la orice st.rerun() venit din altă sursă decât uploaderul însuși.
-    uploaded_file = st.file_uploader(
-        "Încarcă fișier (imagine, PDF, Word, text, DBF, subtitrare)",
+    # Mai multe fișiere deodată (accept_multiple_files). Cheie fixă: widgetul își păstrează
+    # valoarea peste rerun-urile programatice (schimbare materie, toggle mod etc.).
+    uploaded_files = st.file_uploader(
+        f"Încarcă fișiere (maxim {MAX_UPLOAD_FILES}: imagini, PDF, Word, text, DBF, subtitrare)",
         type=["jpg", "jpeg", "png", "webp", "gif", "pdf",
               "txt", "srt", "docx", "doc", "dbf"],
+        accept_multiple_files=True,
         help=(
-            "Imagini: analizate vizual de AI (culori, forme, text, obiecte). "
-            "PDF: citit integral. "
-            "Word (.docx/.doc), text (.txt), subtitrare (.srt), baze de date (.dbf): "
-            "conținutul este extras și trimis la AI."
+            "Poți selecta mai multe fișiere deodată (Ctrl/Cmd + click) sau le poți adăuga pe rând. "
+            "Imagini: analizate vizual de AI. PDF: citit integral. "
+            "Word (.docx), text (.txt), subtitrare (.srt), baze de date (.dbf): conținutul e extras și trimis la AI."
         ),
         key="_main_file_uploader",
     )
-    media_content = None       # obiectul Google File trimis la AI (imagini/PDF)
-    text_file_content = None   # textul extras din fișierele text (txt/docx/doc/dbf/srt)
+    media_content = None       # LISTA de Google Files trimise la AI (imagini/PDF) sau None
+    text_file_content = None   # textul extras din fișierele text (txt/docx/doc/dbf/srt) sau None
 
-    # ── Uploadăm fișierul pe Google Files API (o singură dată per fișier) ──
-    # FIX Bug 1: dacă utilizatorul tocmai a eliminat fișierul, îl ignorăm.
-    # st.file_uploader nu se poate reseta programatic — widgetul îl reafișează după rerun,
-    # deci blocăm re-uploadul prin cheia _removed_file_key setată la eliminare.
-    if uploaded_file and st.session_state.get("_removed_file_key") == f"{uploaded_file.name}_{uploaded_file.size}":
-        uploaded_file = None  # ignorăm fișierul eliminat
+    _all_files = list(uploaded_files or [])
+    # Fișierele scoase cu „🗑️” rămân în widget (nu se poate reseta programatic) → le ignorăm.
+    _removed_keys = st.session_state.setdefault("_removed_file_keys", set())
+    _present_keys = {f"{f.name}_{f.size}" for f in _all_files}
+    _removed_keys.intersection_update(_present_keys)   # scos și din widget → poate fi adăugat din nou
+    _files = [f for f in _all_files if f"{f.name}_{f.size}" not in _removed_keys]
+    if len(_files) > MAX_UPLOAD_FILES:
+        st.warning(f"⚠️ Am păstrat primele {MAX_UPLOAD_FILES} fișiere; restul sunt ignorate.")
+        _files = _files[:MAX_UPLOAD_FILES]
 
-    if uploaded_file:
-        st.session_state.pop("_removed_file_key", None)  # alt fișier nou → curățăm flag-ul
+    if not _files:
+        # Nimic atașat (scos cu X sau cu 🗑️) → nu mai trimitem nimic la AI.
+        for _k in ("_current_uploaded_file_meta", "_active_gfile_keys", "_active_textcache_keys"):
+            st.session_state.pop(_k, None)
+    else:
+        _media_list, _text_parts, _metas = [], [], []
+        _gkeys, _tkeys, _gsrc = [], [], {}
+        for _uf in _files:
+            _fid = f"{_uf.name}_{_uf.size}"
+            _meta = {"name": _uf.name, "type": _uf.type or "", "size": _uf.size}
+            if _is_text_file(_uf):
+                _tkey = f"_txtcache_{_fid}"
+                _txt = st.session_state.get(_tkey)
+                if _txt is None:
+                    with st.spinner(f"📄 Se extrage conținutul din {_uf.name}..."):
+                        _txt = _extract_text_from_uploaded_file(_uf)
+                    if _txt:
+                        st.session_state[_tkey] = _txt
+                    else:
+                        st.error(f"❌ Nu s-a putut extrage textul din {_uf.name}.")
+                if _txt:
+                    _text_parts.append((_uf.name, _txt))
+                    _metas.append(_meta)
+                    _tkeys.append(_tkey)
+            else:
+                _gf = _get_or_upload_gfile(_uf)
+                if _gf:
+                    _media_list.append(_gf)
+                    _metas.append(_meta)
+                    _gkeys.append(f"_gfile_{_fid}")
+                    _bytes = _uf.getvalue()
+                    if len(_bytes) <= 25 * 1024 * 1024:   # pentru re-upload la rotația cheilor
+                        _gsrc[_gf.name] = (_bytes, _uf.type)
 
-        # ── Ramură 1: fișiere text (txt, srt, docx, doc, dbf) — extragere locală ──
-        if _is_text_file(uploaded_file):
-            text_cache_key = f"_txtcache_{uploaded_file.name}_{uploaded_file.size}"
-            cached_text = st.session_state.get(text_cache_key)
+        if _media_list:
+            media_content = _media_list
+            st.session_state["_gsrc_map"] = _gsrc
+        if _text_parts:
+            text_file_content = (
+                _text_parts[0][1] if len(_text_parts) == 1
+                else "\n\n".join(f"=== FIȘIER: {n} ===\n{t}" for n, t in _text_parts)
+            )
+        if _metas:
+            st.session_state["_current_uploaded_file_meta"] = (
+                _metas[0] if len(_metas) == 1 else
+                {"name": f"{len(_metas)} fișiere", "type": "multi", "size": sum(m["size"] for m in _metas),
+                 "files": _metas}
+            )
+        st.session_state["_active_gfile_keys"] = _gkeys
+        st.session_state["_active_textcache_keys"] = _tkeys
 
-            if cached_text is None:
-                with st.spinner("📄 Se extrage conținutul fișierului..."):
-                    cached_text = _extract_text_from_uploaded_file(uploaded_file)
-                if cached_text:
-                    st.session_state[text_cache_key] = cached_text
-                else:
-                    st.error("❌ Nu s-a putut extrage textul din fișier.")
-
-            if cached_text:
-                text_file_content = cached_text
-                st.session_state["_current_uploaded_file_meta"] = {
-                    "name": uploaded_file.name,
-                    "type": uploaded_file.type or "text/plain",
-                    "size": uploaded_file.size,
-                }
-                # FIX PERSISTENȚĂ FIȘIER: salvăm cheia textului cache-uit, pentru
-                # recuperare ulterioară dacă widgetul își pierde valoarea la rerun.
-                st.session_state["_active_textcache_key"] = text_cache_key
-
-                # Preview în sidebar
-                fname_lower = uploaded_file.name.lower()
-                if fname_lower.endswith(".dbf"):
-                    icon = "🗄️"
-                    label = "Bază de date DBF"
-                elif fname_lower.endswith(".srt"):
-                    icon = "🎬"
-                    label = "Fișier subtitrare SRT"
-                elif fname_lower.endswith((".docx", ".doc")):
-                    icon = "📝"
-                    label = "Document Word"
-                else:
-                    icon = "📄"
-                    label = "Fișier text"
-
-                char_count = len(cached_text)
-                st.success(f"✅ {icon} **{uploaded_file.name}** ({char_count:,} caractere)")
-                st.caption(f"📋 {label} — conținutul va fi trimis la AI împreună cu întrebarea ta.")
-
-                # Preview primele 300 caractere
-                if not cached_text.startswith("⚠️"):
-                    with st.expander("👁️ Previzualizare conținut", expanded=False):
-                        preview = cached_text[:300]
-                        if len(cached_text) > 300:
-                            preview += "\n..."
-                        st.text(preview)
-
-                # Buton de ștergere
-                if st.button("🗑️ Elimină fișierul", use_container_width=True, key="remove_text_file"):
-                    st.session_state.pop(text_cache_key, None)
-                    st.session_state.pop("_current_uploaded_file_meta", None)
-                    st.session_state.pop("_active_textcache_key", None)
-                    text_file_content = None
-                    st.session_state["_removed_file_key"] = f"{uploaded_file.name}_{uploaded_file.size}"
-                    st.rerun()
-
-        else:
-            # ── Ramură 2: imagini și PDF — trimise la Google Files API ──
-            file_key   = f"_gfile_{uploaded_file.name}_{uploaded_file.size}"
-            cached_gf  = st.session_state.get(file_key)
-
-            # Dacă fișierul e deja încărcat și valid pe serverele Google, îl refolosim
-            if cached_gf:
+        # ── Lista fișierelor atașate, fiecare cu buton de eliminare ──
+        st.caption(f"📎 {len(_metas)} fișier(e) atașat(e) — se trimit la AI împreună cu întrebarea ta.")
+        for _uf in _files:
+            _fid = f"{_uf.name}_{_uf.size}"
+            _is_txt = _is_text_file(_uf)
+            _ok = (_fid in [k.replace("_txtcache_", "", 1) for k in _tkeys]) if _is_txt \
+                else (f"_gfile_{_fid}" in _gkeys)
+            if not _ok:
+                continue
+            _ico = ("🖼️" if (_uf.type or "").startswith("image/") else "📕" if "pdf" in (_uf.type or "")
+                    else "🎬" if _uf.name.lower().endswith(".srt") else "🗄️" if _uf.name.lower().endswith(".dbf")
+                    else "📝" if _uf.name.lower().endswith((".docx", ".doc")) else "📄")
+            _c1, _c2 = st.columns([5, 1])
+            with _c1:
+                _extra = (f"{len(st.session_state.get('_txtcache_' + _fid, '')):,} caractere" if _is_txt
+                          else f"{max(1, _uf.size // 1024)} KB")
+                st.markdown(f"{_ico} **{_uf.name}**  \n<small>{_extra}</small>", unsafe_allow_html=True)
+            with _c2:
+                st.button("🗑️", key=f"_rm_file_{_fid}", help=f"Elimină {_uf.name}",
+                          on_click=_remove_attached_file, args=(_uf.name, _uf.size, not _is_txt))
+            if (_uf.type or "").startswith("image/"):
                 try:
-                    gemini_client = genai.Client(api_key=keys[st.session_state.key_index])
-                    refreshed = gemini_client.files.get(name=cached_gf.name)
-                    if str(refreshed.state) in ("FileState.ACTIVE", "ACTIVE", "FileState.PROCESSING", "PROCESSING") or getattr(refreshed.state, "name", "") in ("ACTIVE", "PROCESSING"):
-                        media_content = refreshed
+                    st.image(_uf, use_container_width=True)
                 except Exception:
-                    # Fișierul a expirat pe Google (TTL 48h) — îl re-uploadăm
-                    st.session_state.pop(file_key, None)
-                    cached_gf = None
-
-            if not cached_gf:
-                file_type = uploaded_file.type
-                is_image  = file_type.startswith("image/")
-                is_pdf    = "pdf" in file_type
-
-                # Determină sufixul și mime_type corect
-                suffix_map = {
-                    "image/jpeg": ".jpg", "image/jpg": ".jpg",
-                    "image/png": ".png",  "image/webp": ".webp",
-                    "image/gif": ".gif",  "application/pdf": ".pdf",
-                }
-                suffix    = suffix_map.get(file_type, ".bin")
-                mime_type = file_type
-
-                spinner_text = (
-                    "🖼️ Profesorul analizează imaginea..." if is_image
-                    else "📚 Se trimite documentul la AI..."
-                )
-
-                try:
-                    tmp_path = None
-                    try:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                            tmp.write(uploaded_file.getvalue())
-                            tmp_path = tmp.name
-
-                        gemini_client = genai.Client(api_key=keys[st.session_state.key_index])
-
-                        with st.spinner(spinner_text):
-                            gfile = gemini_client.files.upload(file=tmp_path, config=genai_types.UploadFileConfig(mime_type=mime_type))
-                            # Așteptăm procesarea (mai rapid pentru imagini, mai lent pentru PDF-uri mari)
-                            poll = 0
-                            while str(gfile.state) in ("FileState.PROCESSING", "PROCESSING") and poll < 60:
-                                time.sleep(1)
-                                gfile = gemini_client.files.get(name=gfile.name)
-                                poll += 1
-
-                        if _is_gfile_active(gfile):
-                            media_content = gfile
-                            st.session_state[file_key] = gfile  # cache pentru reruns
-                            # Octeții originali (≤ 25 MB), pentru re-upload dacă rotația ne mută pe o cheie
-                            # din alt proiect Google (fișierele Files API sunt legate de proiect).
-                            _src_bytes = uploaded_file.getvalue()
-                            st.session_state["_gsrc_map"] = (
-                                {gfile.name: (_src_bytes, mime_type)} if len(_src_bytes) <= 25 * 1024 * 1024 else {}
-                            )
-                        else:
-                            st.error(f"❌ Fișierul nu a putut fi procesat (stare: {getattr(gfile.state, 'name', str(gfile.state))})")
-
-                    finally:
-                        if tmp_path and os.path.exists(tmp_path):
-                            os.unlink(tmp_path)
-
-                except Exception as e:
-                    _log("Eroare la încărcarea fișierului", "silent", e)
-                    st.error("❌ Fișierul nu a putut fi încărcat. Verifică formatul și dimensiunea și încearcă din nou.")
-
-            # ── Preview în sidebar ──
-            if media_content:
-                # FIX: salvăm metadatele în session_state pentru acces ulterior (scope safety)
-                st.session_state["_current_uploaded_file_meta"] = {
-                    "name": uploaded_file.name,
-                    "type": uploaded_file.type,
-                    "size": uploaded_file.size,
-                }
-                # FIX PERSISTENȚĂ FIȘIER: salvăm și cheia exactă a fișierului Google activ.
-                # Dacă widgetul st.file_uploader își pierde valoarea la un rerun programatic
-                # (schimbare materie, toggle mod etc.), recuperăm fișierul de aici mai jos,
-                # la momentul trimiterii mesajului — fără să depindem de `uploaded_file`.
-                st.session_state["_active_gfile_key"] = f"_gfile_{uploaded_file.name}_{uploaded_file.size}"
-                file_type = uploaded_file.type
-                is_image  = file_type.startswith("image/")
-
-                if is_image:
-                    st.image(uploaded_file, caption=f"🖼️ {uploaded_file.name}", use_container_width=True)
-                    st.success("✅ Imaginea e pe serverele Google — AI-ul o vede complet (culori, forme, text, obiecte).")
-                else:
-                    st.success(f"✅ **{uploaded_file.name}** încărcat ({uploaded_file.size // 1024} KB)")
-                    st.caption("📄 AI-ul poate citi și analiza tot conținutul documentului.")
-
-                # Buton de ștergere — curăță și de pe Google
-                if st.button("🗑️ Elimină fișierul", use_container_width=True, key="remove_media"):
-                    file_key = f"_gfile_{uploaded_file.name}_{uploaded_file.size}"
-                    gf = st.session_state.pop(file_key, None)
-                    if gf:
-                        try:
-                            gemini_client = genai.Client(api_key=keys[st.session_state.key_index])
-                            gemini_client.files.delete(name=gf.name)
-                            _log("Fișier eliminat de pe Google Files API.", "info")
-                        except Exception as _e:
-                            _log(f"Nu s-a putut șterge fișierul Google Files API: {_e}", "silent")
-                    media_content = None
-                    st.session_state.pop("_current_uploaded_file_meta", None)
-                    st.session_state.pop("_active_gfile_key", None)
-                    st.session_state.pop("_gsrc_map", None)
-                    # FIX Bug 1: marcăm fișierul ca "de ignorat" — după rerun, widget-ul
-                    # st.file_uploader încă returnează fișierul (nu se poate reseta programatic),
-                    # deci blocăm re-uploadul prin cheie de excludere.
-                    st.session_state["_removed_file_key"] = f"{uploaded_file.name}_{uploaded_file.size}"
-                    st.rerun()
+                    st.caption("(previzualizare indisponibilă pentru această imagine)")
+            elif _is_txt and not st.session_state.get("_txtcache_" + _fid, "").startswith("⚠️"):
+                with st.expander("👁️ Previzualizare", expanded=False):
+                    _t = st.session_state.get("_txtcache_" + _fid, "")
+                    st.text(_t[:300] + ("\n..." if len(_t) > 300 else ""))
 
     st.divider()
 
@@ -7878,11 +7859,12 @@ if st.session_state.pop("_pending_retry", False):
     _retry_history  = st.session_state.get("_retry_history")
     _retry_payload  = st.session_state.get("_retry_payload")
     if _retry_history is not None and _retry_payload is not None:
-        if media_content is not None:
-            # Payload-ul salvat poate conține un fișier urcat cu o cheie veche; sidebar-ul tocmai
-            # l-a verificat/re-urcat cu cheia curentă, deci îl înlocuim cu versiunea actuală.
+        if media_content:
+            # Payload-ul salvat poate conține fișiere urcate cu o cheie veche; sidebar-ul tocmai
+            # le-a verificat/re-urcat cu cheia curentă, deci le înlocuim (în ordine) cu versiunile actuale.
+            _cur_media = iter(media_content if isinstance(media_content, list) else [media_content])
             _retry_payload = [
-                media_content if (not isinstance(_p, str) and hasattr(_p, "uri")) else _p
+                next(_cur_media, _p) if (not isinstance(_p, str) and hasattr(_p, "uri")) else _p
                 for _p in _retry_payload
             ]
         with st.chat_message("assistant"):
@@ -7939,23 +7921,23 @@ if user_input := st.chat_input("Întreabă profesorul..."):
     # `uploaded_file` se pierdea. Trebuie făcut ÎNAINTE de detecția de materie de mai
     # jos, care depinde de text_file_content.
     if not media_content:
-        _active_key = st.session_state.get("_active_gfile_key")
-        if _active_key and st.session_state.get(_active_key):
+        _rec_media = []
+        for _k in st.session_state.get("_active_gfile_keys", []) or []:
+            _gf_check = st.session_state.get(_k)
             try:
-                _gf_check = st.session_state[_active_key]
-                if _is_gfile_active(_gf_check):
-                    media_content = _gf_check
-                else:
-                    # A expirat sau a fost invalidat — curățăm referințele stale
-                    st.session_state.pop(_active_key, None)
-                    st.session_state.pop("_active_gfile_key", None)
+                if _gf_check and _is_gfile_active(_gf_check):
+                    _rec_media.append(_gf_check)
             except Exception:
                 pass
+        media_content = _rec_media or None
 
     if not text_file_content:
-        _active_txt_key = st.session_state.get("_active_textcache_key")
-        if _active_txt_key and st.session_state.get(_active_txt_key):
-            text_file_content = st.session_state[_active_txt_key]
+        _rec_txt = [st.session_state.get(_k) for _k in (st.session_state.get("_active_textcache_keys", []) or [])]
+        _rec_txt = [t for t in _rec_txt if t]
+        if len(_rec_txt) == 1:
+            text_file_content = _rec_txt[0]
+        elif _rec_txt:
+            text_file_content = "\n\n".join(_rec_txt)
 
     # ── Detecție și routing materie ──
     _materie_manuala = st.session_state.get("materie_selectata")  # None = mod Automat
@@ -7965,9 +7947,10 @@ if user_input := st.chat_input("Întreabă profesorul..."):
     # o operație pe fișier ("traduce din engleză în română", "rezumă", etc.) și conține
     # cuvinte-cheie de limbi/materii care ar declanșa fals detecția.
     # Excludem complet detecția de materie în acest caz.
+    _ufm = st.session_state.get("_current_uploaded_file_meta", {}) or {}
     _has_text_file_uploaded = bool(
-        st.session_state.get("_current_uploaded_file_meta", {}).get("name", "").lower().split(".")[-1]
-        in ("srt", "txt", "docx", "doc", "dbf")
+        (_ufm.get("type") == "multi"
+         or _ufm.get("name", "").lower().split(".")[-1] in ("srt", "txt", "docx", "doc", "dbf"))
         and text_file_content  # fișierul chiar a fost încărcat și extras
     )
 
