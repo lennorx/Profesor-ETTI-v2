@@ -10,6 +10,7 @@ import os
 import random
 import re
 import hashlib
+import hmac
 import secrets
 import threading
 from collections import defaultdict
@@ -1087,21 +1088,27 @@ def is_valid_session_id(sid: str) -> bool:
     return bool(_SESSION_ID_RE.match(sid))
 
 
-def session_exists_in_db(session_id: str) -> bool:
-    """Verifică dacă un session_id există deja în Supabase."""
+def _session_owner(session_id: str) -> tuple[bool, str | None]:
+    """(există, etti_user_id) pentru o sesiune. La eroare: (False, None)."""
     try:
         supabase = get_supabase_client()
         response = (
             supabase.table("sessions")
-            .select("session_id")
+            .select("session_id, etti_user_id")
             .eq("session_id", session_id)
-            .eq("app_id", get_app_id())
             .limit(1)
             .execute()
         )
-        return len(response.data) > 0
+        if not response.data:
+            return False, None
+        return True, response.data[0].get("etti_user_id")
     except Exception:
-        return False
+        return False, None
+
+
+def session_exists_in_db(session_id: str) -> bool:
+    """Verifică dacă un session_id există deja în Supabase."""
+    return _session_owner(session_id)[0]
 
 
 def register_session(session_id: str):
@@ -1111,14 +1118,284 @@ def register_session(session_id: str):
     try:
         client = get_supabase_client()
         now = time.time()
-        client.table("sessions").upsert({
+        row = {
             "session_id": session_id,
             "created_at": now,
             "last_active": now,
-            "app_id": get_app_id()
-        }).execute()
+            "app_id": get_app_id(),
+        }
+        _uid = current_user_id()
+        if _uid:
+            row["etti_user_id"] = _uid   # conversația aparține contului → apare pe toate device-urile
+        # ignore_duplicates: o sesiune existentă NU e suprascrisă (nici proprietarul, nici created_at)
+        client.table("sessions").upsert(row, ignore_duplicates=True).execute()
     except Exception as e:
         _log("Eroare la înregistrarea sesiunii", "silent", e)
+
+
+# === AUTENTIFICARE OPȚIONALĂ (cont ETTI) ===
+# Fără cont: aplicația merge ca înainte (conversațiile stau în acest browser).
+# Cu cont: conversațiile sunt legate de cont (sessions.etti_user_id) și apar pe orice device.
+# „Ține-mă minte”: un token aleator stă în localStorage-ul browserului; în DB păstrăm doar
+# hash-ul lui (sha256), deci o scurgere a bazei nu permite logarea. Parolele: scrypt (stdlib).
+AUTH_TOKEN_DAYS = 180
+AUTH_MIN_PASSWORD = 8
+AUTH_MAX_FAILS = 5            # încercări greșite per email ...
+AUTH_FAIL_WINDOW = 600        # ... în 10 minute
+_EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[a-zA-Z]{2,24}$")
+
+
+def current_user() -> dict | None:
+    return st.session_state.get("_auth_user")
+
+
+def current_user_id() -> str | None:
+    u = current_user()
+    return u.get("id") if u else None
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    n, r, p = 2 ** 14, 8, 1
+    dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=32)
+    return f"scrypt${n}${r}${p}${salt.hex()}${dk.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        algo, n, r, p, salt_hex, dk_hex = stored.split("$")
+        if algo != "scrypt":
+            return False
+        dk = hashlib.scrypt(password.encode("utf-8"), salt=bytes.fromhex(salt_hex),
+                            n=int(n), r=int(r), p=int(p), dklen=len(dk_hex) // 2)
+        return hmac.compare_digest(dk.hex(), dk_hex)
+    except Exception:
+        return False
+
+
+def _token_hash(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+@st.cache_resource
+def _get_auth_fail_store() -> dict:
+    return {"lock": threading.Lock(), "fails": defaultdict(list)}
+
+
+def _auth_blocked(email: str) -> bool:
+    store = _get_auth_fail_store()
+    with store["lock"]:
+        recent = [t for t in store["fails"][email] if t > time.time() - AUTH_FAIL_WINDOW]
+        store["fails"][email] = recent
+        return len(recent) >= AUTH_MAX_FAILS
+
+
+def _auth_note_fail(email: str):
+    store = _get_auth_fail_store()
+    with store["lock"]:
+        store["fails"][email].append(time.time())
+
+
+def _public_user(row: dict) -> dict:
+    return {"id": row["id"], "email": row["email"], "name": row.get("display_name") or row["email"].split("@")[0]}
+
+
+def auth_register(email: str, password: str, display_name: str = "") -> tuple[dict | None, str]:
+    """Creează contul. Returnează (user, "") sau (None, mesaj_eroare)."""
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        return None, "Adresa de email nu pare validă."
+    if len(password or "") < AUTH_MIN_PASSWORD:
+        return None, f"Parola trebuie să aibă cel puțin {AUTH_MIN_PASSWORD} caractere."
+    client = get_supabase_client()
+    if client is None:
+        return None, "Baza de date nu e disponibilă acum. Încearcă mai târziu."
+    try:
+        exists = client.table("etti_users").select("id").eq("email", email).limit(1).execute()
+        if exists.data:
+            return None, "Există deja un cont cu acest email. Folosește „Intră în cont”."
+        now = time.time()
+        res = client.table("etti_users").insert({
+            "email": email,
+            "password_hash": _hash_password(password),
+            "display_name": (display_name or "").strip()[:60] or None,
+            "created_at": now,
+            "last_login": now,
+        }).execute()
+        return _public_user(res.data[0]), ""
+    except Exception as e:
+        _log("Înregistrare cont eșuată", "silent", e)
+        return None, "Contul nu a putut fi creat. Încearcă din nou."
+
+
+def auth_login(email: str, password: str) -> tuple[dict | None, str]:
+    email = (email or "").strip().lower()
+    if _auth_blocked(email):
+        return None, "Prea multe încercări greșite. Așteaptă 10 minute."
+    client = get_supabase_client()
+    if client is None:
+        return None, "Baza de date nu e disponibilă acum. Încearcă mai târziu."
+    try:
+        res = client.table("etti_users").select("id, email, display_name, password_hash") \
+            .eq("email", email).limit(1).execute()
+    except Exception as e:
+        _log("Autentificare: eroare DB", "silent", e)
+        return None, "Autentificarea nu a mers acum. Încearcă din nou."
+    row = res.data[0] if res.data else None
+    if not row or not _verify_password(password or "", row["password_hash"]):
+        _auth_note_fail(email)
+        return None, "Email sau parolă greșită."
+    try:
+        client.table("etti_users").update({"last_login": time.time()}).eq("id", row["id"]).execute()
+    except Exception:
+        pass
+    return _public_user(row), ""
+
+
+def _issue_remember_token(user_id: str) -> str | None:
+    raw = secrets.token_urlsafe(32)
+    now = time.time()
+    try:
+        get_supabase_client().table("etti_tokens").insert({
+            "token_hash": _token_hash(raw),
+            "user_id": user_id,
+            "created_at": now,
+            "expires_at": now + AUTH_TOKEN_DAYS * 86400,
+            "last_used": now,
+        }).execute()
+        return raw
+    except Exception as e:
+        _log("Token „ține-mă minte” nu a putut fi creat", "silent", e)
+        return None
+
+
+def _user_from_token(raw: str) -> dict | None:
+    """Returnează utilizatorul pentru token (și prelungește valabilitatea), sau None."""
+    if not raw or not isinstance(raw, str) or len(raw) > 200:
+        return None
+    try:
+        client = get_supabase_client()
+        th = _token_hash(raw)
+        res = client.table("etti_tokens").select("user_id, expires_at").eq("token_hash", th).limit(1).execute()
+        if not res.data or res.data[0]["expires_at"] < time.time():
+            return None
+        u = client.table("etti_users").select("id, email, display_name") \
+            .eq("id", res.data[0]["user_id"]).limit(1).execute()
+        if not u.data:
+            return None
+        now = time.time()
+        client.table("etti_tokens").update({
+            "last_used": now, "expires_at": now + AUTH_TOKEN_DAYS * 86400,
+        }).eq("token_hash", th).execute()
+        client.table("etti_users").update({"last_login": now}).eq("id", u.data[0]["id"]).execute()
+        return _public_user(u.data[0])
+    except Exception as e:
+        _log("Restaurare login din token eșuată", "silent", e)
+        return None
+
+
+def _set_browser_token(raw: str | None):
+    """Programează scrierea/ștergerea tokenului în localStorage (scriptul e randat la fiecare run
+    de inject_session_js; conținut identic = nu se re-execută)."""
+    st.session_state["_auth_ls_js"] = (
+        f"localStorage.setItem('profesor_auth_token', {json.dumps(raw)});" if raw
+        else "localStorage.removeItem('profesor_auth_token');"
+    )
+
+
+def _claim_browser_sessions(user_id: str):
+    """Conversațiile anonime din acest browser trec în contul utilizatorului."""
+    sids = [s for s in set(st.session_state.get("_my_session_ids", []) + [st.session_state.get("session_id", "")])
+            if is_valid_session_id(s)]
+    if not sids:
+        return
+    try:
+        get_supabase_client().table("sessions").update({"etti_user_id": user_id}) \
+            .in_("session_id", sids).is_("etti_user_id", "null").execute()
+    except Exception as e:
+        _log("Atașarea conversațiilor la cont a eșuat", "silent", e)
+
+
+def auth_complete_login(user: dict, remember: bool):
+    st.session_state["_auth_user"] = user
+    _claim_browser_sessions(user["id"])
+    _set_browser_token(_issue_remember_token(user["id"]) if remember else None)
+    st.session_state["_sid_registered"] = set()   # re-verificăm proprietarul sesiunii curente
+    invalidate_session_cache()
+
+
+def auth_logout(all_devices: bool = False):
+    user = current_user()
+    raw = (st.session_state.get("_browser_storage") or {}).get("token") or st.session_state.get("_auth_raw_token")
+    try:
+        client = get_supabase_client()
+        if user and all_devices:
+            client.table("etti_tokens").delete().eq("user_id", user["id"]).execute()
+        elif raw:
+            client.table("etti_tokens").delete().eq("token_hash", _token_hash(raw)).execute()
+    except Exception as e:
+        _log("Ștergere token la deconectare eșuată", "silent", e)
+    st.session_state.pop("_auth_user", None)
+    st.session_state.pop("_auth_raw_token", None)
+    if isinstance(st.session_state.get("_browser_storage"), dict):
+        st.session_state["_browser_storage"]["token"] = ""
+    _set_browser_token(None)
+    # Conversația curentă aparține contului: pornim una nouă, anonimă, pe acest browser.
+    new_sid = generate_unique_session_id()
+    st.session_state["_sid_registered"] = set()
+    register_session(new_sid)
+    st.session_state["_my_session_ids"] = [new_sid]
+    switch_session(new_sid)
+    try:
+        st.query_params["sid"] = new_sid
+    except Exception:
+        pass
+
+
+def _resolve_session_for_user(sid: str) -> str:
+    """Înregistrează sid-ul dacă e nou. Dacă aparține ALTUI cont, nu îl deschidem: pornim o
+    conversație nouă (ID-ul din link nu mai e suficient pentru a citi conversația unui cont)."""
+    reg = st.session_state.setdefault("_sid_registered", set())
+    if sid in reg:
+        return sid
+    exists, owner = _session_owner(sid)
+    if exists and owner and owner != current_user_id():
+        sid = generate_unique_session_id()
+        exists = False
+    if not exists:
+        register_session(sid)
+    if st.session_state.get("_sb_online", True):
+        reg.add(sid)
+    return sid
+
+
+def load_browser_storage_and_login():
+    """O dată per sesiune Streamlit: citește din browser SID-ul, lista de conversații și tokenul
+    de login (componenta session_bridge), apoi restaurează automat contul din token."""
+    if "_browser_storage" not in st.session_state:
+        val = _session_bridge(key="_session_bridge", default=None) if _session_bridge is not None else {}
+        if val is None:
+            st.markdown(
+                '<div style="display:flex;align-items:center;justify-content:center;'
+                'min-height:40vh;color:#888;font-size:15px;">🎓 Se încarcă...</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Dacă pagina rămâne aici mai mult de câteva secunde, apasă mai jos.")
+            if st.button("🔄 Continuă", key="_session_gate_manual_continue"):
+                st.session_state["_browser_storage"] = {}
+                st.rerun()
+            st.stop()
+        st.session_state["_browser_storage"] = val if isinstance(val, dict) else {}
+    if not st.session_state.get("_auth_restore_done"):
+        st.session_state["_auth_restore_done"] = True
+        raw = (st.session_state["_browser_storage"] or {}).get("token") or ""
+        if raw and not current_user():
+            user = _user_from_token(raw)
+            if user:
+                st.session_state["_auth_user"] = user
+                st.session_state["_auth_raw_token"] = raw
+            elif is_supabase_available() and get_supabase_client() is not None:
+                _set_browser_token(None)   # token expirat/revocat → îl scoatem din browser
 
 
 def update_session_activity(session_id: str):
@@ -1159,6 +1436,11 @@ def inject_session_js():
         if _known_ids:
             _existing = set(st.session_state.get("_my_session_ids", []))
             st.session_state["_my_session_ids"] = list(_existing.union(_known_ids))
+
+    _auth_js = st.session_state.get("_auth_ls_js")
+    if _auth_js:
+        # scriere/ștergere token „ține-mă minte” (identic la fiecare run → se execută o singură dată)
+        components.html(f"<script>try{{{_auth_js}}}catch(e){{}}</script>", height=0)
 
     components.html(f"""
     <script>
@@ -1243,12 +1525,15 @@ def get_or_create_session_id() -> str:
         # URL are ?sid= valid — înregistrează dacă e nou, altfel restaurează
         # O singură verificare în DB per SID și sesiune Streamlit (înainte: un query la FIECARE rerun).
         # Nu marcăm SID-ul ca verificat cât Supabase e offline — altfel nu s-ar mai înregistra niciodată.
-        _reg_sids = st.session_state.setdefault("_sid_registered", set())
-        if sid_from_url not in _reg_sids:
-            if not session_exists_in_db(sid_from_url):
-                register_session(sid_from_url)
-            if st.session_state.get("_sb_online", True):
-                _reg_sids.add(sid_from_url)
+        _resolved = _resolve_session_for_user(sid_from_url)
+        if _resolved != sid_from_url:
+            # conversația din link aparține altui cont → pornim una nouă
+            st.session_state["session_id"] = _resolved
+            try:
+                st.query_params["sid"] = _resolved
+            except Exception:
+                pass
+            return _resolved
         st.session_state["session_id"] = sid_from_url
         # FIX PERSISTENȚĂ LISTĂ CONVERSAȚII: dacă gate-ul de mai jos a transmis
         # ?known= la restaurare (vezi blocul JS), îl absorbim aici în session_state
@@ -1266,6 +1551,8 @@ def get_or_create_session_id() -> str:
     # (poate fi setat de JS prin query param la un rerun anterior în aceeași sesiune Streamlit).
     existing_in_state = st.session_state.get("session_id", "")
     if is_valid_session_id(existing_in_state):
+        existing_in_state = _resolve_session_for_user(existing_in_state)
+        st.session_state["session_id"] = existing_in_state
         # Repunem în URL pentru consistență (JS îl va citi și salva în localStorage)
         try:
             st.query_params["sid"] = existing_in_state
@@ -1283,24 +1570,8 @@ def get_or_create_session_id() -> str:
     candidate_id = generate_unique_session_id()
     _force_new = st.query_params.get("new", "") == "1"
 
-    _stored = None
-    if _session_bridge is not None:
-        _stored = _session_bridge(key="_session_bridge", default=None)
-        if _stored is None:
-            # Componenta nu a răspuns încă (primul run): ecran de încărcare scurt.
-            st.markdown(
-                '<div style="display:flex;align-items:center;justify-content:center;'
-                'min-height:40vh;color:#888;font-size:15px;">🎓 Se încarcă...</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption("Dacă pagina rămâne aici mai mult de câteva secunde, apasă mai jos "
-                       "(pornește o conversație nouă).")
-            if st.button("🔄 Continuă", key="_session_gate_manual_continue"):
-                st.session_state["session_id"] = candidate_id
-                st.rerun()
-            st.stop()
-
-    _stored = _stored if isinstance(_stored, dict) else {}
+    # Valorile din localStorage au fost citite de load_browser_storage_and_login()
+    _stored = st.session_state.get("_browser_storage") or {}
     _stored_sid = str(_stored.get("sid") or "")
     if not _force_new and is_valid_session_id(_stored_sid):
         sid = _stored_sid          # browserul a mai folosit aplicația → restaurăm conversația
@@ -1312,10 +1583,7 @@ def get_or_create_session_id() -> str:
         _existing = set(st.session_state.get("_my_session_ids", []))
         st.session_state["_my_session_ids"] = list(_existing.union(_known_ids))
 
-    if not session_exists_in_db(sid):
-        register_session(sid)
-    if st.session_state.get("_sb_online", True):
-        st.session_state.setdefault("_sid_registered", set()).add(sid)
+    sid = _resolve_session_for_user(sid)
     st.session_state["session_id"] = sid
     try:
         if "new" in st.query_params:
@@ -1756,6 +2024,9 @@ def render_message_with_svg(content: str):
 # === INIȚIALIZARE ===
 init_db()
 cleanup_old_sessions(CLEANUP_DAYS_OLD)
+
+# Citește din browser SID-ul salvat + tokenul de login și restaurează contul (o dată per sesiune)
+load_browser_storage_and_login()
 
 # Python generează/restaurează SID — poate pune ?sid= în URL pentru JS
 session_id = get_or_create_session_id()
@@ -5658,6 +5929,59 @@ else:
         st.caption(f"Materie selectată: **{_mat_label}**")
 
 with st.sidebar:
+    # --- Cont (opțional) ---
+    _user = current_user()
+    if _user:
+        st.markdown(f"👤 **{_user['name']}**  \n<small>{_user['email']}</small>", unsafe_allow_html=True)
+        st.caption("Conversațiile tale sunt salvate în cont și apar pe orice dispozitiv.")
+        _lo1, _lo2 = st.columns(2)
+        with _lo1:
+            if st.button("🚪 Ieșire", key="_auth_logout", use_container_width=True):
+                auth_logout()
+                st.rerun()
+        with _lo2:
+            if st.button("Ieșire peste tot", key="_auth_logout_all", use_container_width=True,
+                         help="Deconectează contul de pe toate dispozitivele"):
+                auth_logout(all_devices=True)
+                st.rerun()
+    else:
+        with st.expander("👤 Cont — conversațiile tale pe orice dispozitiv", expanded=False):
+            _tab_in, _tab_new = st.tabs(["Intră în cont", "Cont nou"])
+            with _tab_in:
+                with st.form("_auth_login_form", clear_on_submit=False):
+                    _le = st.text_input("Email", key="_auth_login_email", autocomplete="email")
+                    _lp = st.text_input("Parolă", type="password", key="_auth_login_pw",
+                                        autocomplete="current-password")
+                    _lr = st.checkbox("Ține-mă minte pe acest dispozitiv", value=True, key="_auth_login_rem")
+                    if st.form_submit_button("Intră", type="primary", use_container_width=True):
+                        _u, _err = auth_login(_le, _lp)
+                        if _u:
+                            auth_complete_login(_u, _lr)
+                            st.rerun()
+                        else:
+                            st.error(_err)
+            with _tab_new:
+                with st.form("_auth_register_form", clear_on_submit=False):
+                    _rn = st.text_input("Nume (opțional)", key="_auth_reg_name", max_chars=60)
+                    _re_ = st.text_input("Email", key="_auth_reg_email", autocomplete="email")
+                    _rp = st.text_input(f"Parolă (minim {AUTH_MIN_PASSWORD} caractere)", type="password",
+                                        key="_auth_reg_pw", autocomplete="new-password")
+                    _rp2 = st.text_input("Repetă parola", type="password", key="_auth_reg_pw2",
+                                         autocomplete="new-password")
+                    _rr = st.checkbox("Ține-mă minte pe acest dispozitiv", value=True, key="_auth_reg_rem")
+                    st.caption("Conversațiile din acest browser vor fi mutate în contul nou.")
+                    if st.form_submit_button("Creează cont", type="primary", use_container_width=True):
+                        if _rp != _rp2:
+                            st.error("Parolele nu coincid.")
+                        else:
+                            _u, _err = auth_register(_re_, _rp, _rn)
+                            if _u:
+                                auth_complete_login(_u, _rr)
+                                st.rerun()
+                            else:
+                                st.error(_err)
+    st.divider()
+
     st.header("⚙️ Opțiuni")
 
     # --- Selector materie ---
@@ -6479,16 +6803,18 @@ with st.sidebar:
     sessions = []
     try:
         _supabase = get_supabase_client()
-        _resp = (
+        _q = (
             _supabase.table("session_previews")
             .select("session_id, last_active, msg_count, preview")
             .eq("app_id", get_app_id())
-            .in_("session_id", _my_sids)
-            .gt("msg_count", 0)
-            .order("last_active", desc=True)
-            .limit(15)
-            .execute()
         )
+        if current_user_id():
+            # Cu cont: toate conversațiile contului, de pe orice device
+            _q = _q.eq("etti_user_id", current_user_id())
+        else:
+            # Fără cont: doar conversațiile anonime ale acestui browser
+            _q = _q.in_("session_id", _my_sids).is_("etti_user_id", "null")
+        _resp = _q.gt("msg_count", 0).order("last_active", desc=True).limit(30 if current_user_id() else 15).execute()
         sessions = _resp.data or []
     except Exception:
         pass
