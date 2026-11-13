@@ -1144,7 +1144,15 @@ AUTH_TOKEN_DAYS = 180
 AUTH_MIN_PASSWORD = 8
 AUTH_MAX_FAILS = 5            # încercări greșite per email ...
 AUTH_FAIL_WINDOW = 600        # ... în 10 minute
-_EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[a-zA-Z]{2,24}$")
+_EMAIL_RE = re.compile(r"^[^@\s:<>,;]{1,64}@[^@\s:<>,;]{1,255}\.[a-zA-Z]{2,24}$")
+
+
+def _normalize_email(email: str) -> str:
+    """Litere mici, fără spații și fără prefixul „mailto:” / paranteze <> (apar când emailul e
+    copiat dintr-un link — așa a ajuns în DB un cont „mailto:...”, imposibil de resetat)."""
+    e = (email or "").strip().strip("<>").strip()
+    e = re.sub(r"^mailto:", "", e, flags=re.IGNORECASE)
+    return e.split("?")[0].strip().lower()
 
 
 def current_user() -> dict | None:
@@ -1204,7 +1212,7 @@ def _public_user(row: dict) -> dict:
 
 def auth_register(email: str, password: str, display_name: str = "") -> tuple[dict | None, str]:
     """Creează contul. Returnează (user, "") sau (None, mesaj_eroare)."""
-    email = (email or "").strip().lower()
+    email = _normalize_email(email)
     if not _EMAIL_RE.match(email):
         return None, "Adresa de email nu pare validă."
     if len(password or "") < AUTH_MIN_PASSWORD:
@@ -1234,7 +1242,7 @@ def auth_register(email: str, password: str, display_name: str = "") -> tuple[di
 
 
 def auth_login(email: str, password: str) -> tuple[dict | None, str]:
-    email = (email or "").strip().lower()
+    email = _normalize_email(email)
     if _auth_blocked(email):
         return None, "Prea multe încercări greșite. Așteaptă 10 minute."
     client = get_supabase_client()
@@ -1318,7 +1326,7 @@ def _get_reset_mail_store() -> dict:
 def auth_request_reset_email(email: str) -> tuple[bool, str]:
     """Trimite un cod de 6 cifre pe email. Mesajul e același dacă emailul există sau nu
     (nu dezvăluim ce adrese au cont)."""
-    email = (email or "").strip().lower()
+    email = _normalize_email(email)
     if not _EMAIL_RE.match(email):
         return False, "Adresa de email nu pare validă."
     if not _smtp_config():
@@ -1359,7 +1367,7 @@ def auth_reset_password(email: str, code: str, new_password: str) -> tuple[dict 
     """Schimbă parola folosind codul din email (6 cifre) SAU codul de recuperare.
     La succes: toate dispozitivele sunt deconectate; dacă s-a folosit codul de recuperare,
     se generează unul nou (pus în st.session_state["_auth_new_recovery"])."""
-    email = (email or "").strip().lower()
+    email = _normalize_email(email)
     code = (code or "").strip()
     if len(new_password or "") < AUTH_MIN_PASSWORD:
         return None, f"Parola nouă trebuie să aibă cel puțin {AUTH_MIN_PASSWORD} caractere."
