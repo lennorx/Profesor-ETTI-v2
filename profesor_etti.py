@@ -921,7 +921,10 @@ def _show_ai_error(e: Exception, context: str = "") -> str:
     """Loghează excepția pe server și arată un mesaj prietenos. Returnează categoria erorii."""
     _log(f"[AI] eroare{' (' + context + ')' if context else ''}", "silent", e)
     low = (str(e) + " " + repr(e)).lower()
-    if "toate cheile" in low or "epuizat" in low or "quota" in low or re.search(r"\b429\b", low):
+    if "pentru azi" in low:
+        cat, msg = "quota", ("📅 Serviciul AI gratuit și-a epuizat cota pentru azi, pe toate cheile și modelele. "
+                             "Cotele se resetează în jurul orei 10:00 (ora României).")
+    elif "toate cheile" in low or "epuizat" in low or "quota" in low or re.search(r"\b429\b", low):
         cat, msg = "quota", ("⏳ Serviciul AI gratuit a atins temporar limita de utilizare. "
                              "Încearcă din nou peste câteva minute.")
     elif "supraînc" in low or "overloaded" in low or re.search(r"\b503\b", low):
@@ -5145,6 +5148,9 @@ def extract_text_from_photo(image_bytes: bytes, materie_label: str, mime_type: s
     același mecanism ca în sidebar, pentru analiză vizuală completă.
     """
     try:
+        _pk = _pick_key_and_model(MODEL_CHAIN)
+        if _pk:
+            st.session_state.key_index = _pk[0]
         key = keys[st.session_state.get("key_index", 0)]
         gemini_client = genai.Client(api_key=key)
 
@@ -5180,18 +5186,24 @@ def extract_text_from_photo(image_bytes: bytes, materie_label: str, mime_type: s
             f"Dacă un cuvânt e greu de citit, transcrie-l cu [?]. "
             f"Nu adăuga nimic, nu corecta nimic — transcrie fidel."
         )
+        # Prin rotație: dacă modelul/cheia e epuizată, trece automat pe următoarele
+        # (octeții pozei sunt păstrați ca imaginea să poată fi re-urcată pe altă cheie/proiect).
+        _gsrc = st.session_state.get("_gsrc_map") or {}
+        _gsrc[gfile.name] = (image_bytes, mime_type)
+        st.session_state["_gsrc_map"] = _gsrc
         try:
-            response = gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[gfile, prompt]
-            )
-            return response.text.strip()
+            text = "".join(run_chat_with_rotation(
+                [], [gfile, prompt],
+                system_prompt="Transcrii fidel textul din imagini. Răspunzi doar cu textul transcris.",
+                use_cache=False,
+            ))
+            return text.strip()
         finally:
-            # Curăță fișierul de pe Google indiferent de rezultat (succes sau eroare)
             try:
-                gemini_client.files.delete(name=gfile.name)
+                genai.Client(api_key=keys[st.session_state.get("key_index", 0)]).files.delete(name=gfile.name)
             except Exception:
                 pass
+            _gsrc.pop(gfile.name, None)
 
     except Exception as e:
         _log("Eroare OCR poză", "silent", e)
@@ -5822,109 +5834,176 @@ def _ensure_gfile_for_client(client, gfile):
     return _reupload_gfile(client, gfile) or gfile
 
 
-def run_chat_with_rotation(history_obj, payload, system_prompt=None, live_stream=False):
-    """Rulează chat cu rotație automată a cheilor API, fallback modele și context caching.
+# === LANȚ DE MODELE + MEMORIA COTELOR EPUIZATE ===
+# Cotele gratuite Gemini sunt per PROIECT Google și per MODEL (AI Studio → Rate limit, nov. 2026):
+#   gemini-3.1-flash-lite / gemini-3.5-flash-lite : 15 RPM · 250K TPM · 500 RPD  (cele mai generoase)
+#   gemini-3.6-flash / gemini-3-flash-preview / gemini-3.8-flash / gemini-2.5-flash : 5 RPM · 20 RPD
+#   gemini-2.5-flash-lite : 10 RPM · 20 RPD
+# Ordinea = cota zilnică mare întâi, apoi rezervele mici. Fiecare combinație (cheie, model)
+# care primește 429 e ținută minte (comun pentru TOȚI elevii, cât trăiește serverul):
+#   - limită pe zi  → sărită până la resetare (miezul nopții Pacific ≈ 10:00 ora României)
+#   - limită pe minut / supraîncărcare → sărită ~1 minut
+#   - model inexistent (404) → sărit 6 ore; cheie invalidă → sărită 1 oră pe toate modelele
+# Astfel un mesaj nu mai pierde timp încercând combinații epuizate: alege direct prima liberă.
+MODEL_CHAIN = [
+    GEMINI_MODEL,               # gemini-3.1-flash-lite — principal (+ context caching)
+    "gemini-3.5-flash-lite",    # 500 RPD
+    "gemini-3.6-flash",         # 20 RPD
+    "gemini-3-flash-preview",   # 20 RPD
+    "gemini-3.8-flash",         # 20 RPD
+    "gemini-2.5-flash",         # 20 RPD (gândire prin thinking_budget)
+    "gemini-2.5-flash-lite",    # 20 RPD
+]
+MODEL_FALLBACKS_NO_CACHE = MODEL_CHAIN   # nume vechi, păstrat pentru compatibilitate
 
-    live_stream=False (implicit): răspunsul e colectat integral și emis la final — o eroare
-        la jumătatea stream-ului e reîncercată transparent (potrivit pentru SRT, teme, quiz,
-        rezumate, unde nu afișăm text pe măsură ce vine).
-    live_stream=True: bucățile sunt emise IMEDIAT (elevul vede răspunsul apărând). Reîncercările
-        (rotație cheie / model de rezervă) merg doar cât timp nu a fost emis nimic; dacă stream-ul
-        cade după prima bucată, excepția se propagă (o reîncercare ar dubla textul) și handler-ul
-        poate păstra răspunsul parțial — vezi _salvage_partial_response().
 
-    Context Caching: system prompt-ul (~21k tokeni) e cached pentru 10 minute.
-    Tokenii cached costă ~4× mai puțin decât tokenii normali (prețuri Gemini API).
-    Caching funcționează pe gemini-3.1-flash-lite; fallback automat dacă API-ul refuză.
+@st.cache_resource
+def _get_quota_state() -> dict:
+    return {"lock": threading.Lock(), "blocked": {}}   # (amprentă_cheie | "*", model | "*") -> până_la
+
+
+def _key_fp(api_key: str) -> str:
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+
+
+def _next_quota_reset() -> float:
+    """Timestamp-ul următoarei resetări a cotelor zilnice (miezul nopții America/Los_Angeles)."""
+    from datetime import datetime, timedelta, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/Los_Angeles")
+        now = datetime.now(tz)
+        nxt = (now + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+        return nxt.timestamp()
+    except Exception:
+        now = datetime.now(timezone.utc)
+        return (now + timedelta(hours=24)).timestamp()
+
+
+def _quota_block(api_key: str | None, model: str | None, until: float):
+    st_ = _get_quota_state()
+    k = (_key_fp(api_key) if api_key else "*", model or "*")
+    with st_["lock"]:
+        st_["blocked"][k] = max(until, st_["blocked"].get(k, 0))
+
+
+def _quota_blocked_until(api_key: str, model: str) -> float:
+    st_ = _get_quota_state()
+    now = time.time()
+    fp = _key_fp(api_key)
+    with st_["lock"]:
+        b = st_["blocked"]
+        for k in [k for k, v in b.items() if v <= now]:   # curățăm intrările expirate
+            del b[k]
+        return max(b.get((fp, model), 0), b.get((fp, "*"), 0), b.get(("*", model), 0))
+
+
+def _quota_until_from_error(msg: str) -> float:
+    """Cât timp ocolim combinația după un 429: până la resetarea zilnică sau câteva secunde/minute."""
+    low = msg.lower()
+    if "perday" in low or "per_day" in low or "per day" in low or "requests_per_day" in low or "rpd" in low:
+        return _next_quota_reset()
+    m = re.search(r"retry(?:_delay|delay)?[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)\s*s", low)
+    wait = float(m.group(1)) if m else 60.0
+    return time.time() + min(max(wait, 5.0), 300.0)
+
+
+def _pick_key_and_model(chain: list) -> tuple[int, int] | None:
+    """Prima combinație liberă: cheia curentă întâi (toate modelele), apoi celelalte chei."""
+    n = len(keys)
+    start = st.session_state.get("key_index", 0) % max(n, 1)
+    for off in range(n):
+        ki = (start + off) % n
+        for mi, m in enumerate(chain):
+            if _quota_blocked_until(keys[ki], m) <= time.time():
+                return ki, mi
+    return None
+
+
+def quota_status_text() -> str:
+    """Rezumat pentru panoul de diagnostic: câte combinații cheie×model sunt epuizate acum."""
+    total = len(keys) * len(MODEL_CHAIN)
+    free = sum(1 for k in keys for m in MODEL_CHAIN if _quota_blocked_until(k, m) <= time.time())
+    return f"{free}/{total} combinații cheie×model disponibile"
+
+
+def _thinking_config_for(model_name: str):
+    """Gemini 3.x: thinking_level; Gemini 2.5: thinking_budget (nu acceptă thinking_level)."""
+    high = st.session_state.get("mod_gandire_extinsa", False)
+    if model_name.startswith("gemini-2.5"):
+        return genai_types.ThinkingConfig(thinking_budget=-1 if high else 0)
+    return genai_types.ThinkingConfig(thinking_level="high" if high else "low")
+
+
+def run_chat_with_rotation(history_obj, payload, system_prompt=None, live_stream=False, use_cache=True):
+    """Rulează chat cu rotație automată a cheilor API, lanț de modele de rezervă și context caching.
+
+    La fiecare încercare alege prima combinație (cheie, model) care nu e marcată ca epuizată
+    (vezi _get_quota_state). Un 429 marchează combinația și trece imediat la următoarea:
+    alt model pe aceeași cheie, apoi cheia următoare — fără să mai reîncerce ce e deja epuizat.
+
+    live_stream=False: răspunsul e colectat integral și emis la final (reîncercare transparentă).
+    live_stream=True: bucățile sunt emise imediat; după prima bucată nu se mai reîncearcă
+        (ar dubla textul) — vezi _salvage_partial_response().
+    use_cache=False: fără context caching (ex. OCR, unde promptul e scurt).
     """
-    # Model: gemini-3.1-flash-lite (principal + caching + fallback fără caching)
-    MODEL_WITH_CACHE    = _CACHE_MODEL
-    # Lanț de rezervă — ales pe baza limitelor REALE per zi (RPD) de pe tier gratuit
-    # (verificat pe dashboard, sept. 2026), nu doar pe preț per token:
-    #   gemini-3.1-flash-lite: 15 RPM / 500 RPD — principal
-    #   gemini-3.5-flash-lite: 15 RPM / 500 RPD — rezervă 1 (la fel de robust ca principalul,
-    #       folosit ca prim fallback tocmai pentru că NU se epuizează rapid sub sarcină)
-    #   gemini-3.8-flash:       5 RPM /  20 RPD — rezervă 2 (variantă Flash completă, mai
-    #       scumpă și cu RPD mult mai mic — ultimă variantă, nu primă alegere de fallback)
-    MODEL_FALLBACKS_NO_CACHE = [
-        GEMINI_MODEL,           # fallback fără caching: același model principal, apel normal
-        "gemini-3.5-flash-lite",  # rezervă 1
-        "gemini-3.8-flash",       # rezervă 2
-    ]
+    MODEL_WITH_CACHE = _CACHE_MODEL
+    chain = MODEL_CHAIN
 
-    # Guard: dacă nu există chei API configurate, aruncă eroare clară (nu IndexError silențios)
     if not keys:
         raise Exception(
             "Nicio cheie API Gemini configurată. "
-            "Adaugă cel puțin o cheie în st.secrets['GEMINI_KEYS'] sau introdu-o manual în sidebar."
+            "Adaugă cel puțin o cheie în st.secrets['GOOGLE_API_KEYS'] sau introdu-o manual în sidebar."
         )
 
     active_prompt = system_prompt or st.session_state.get("system_prompt") or SYSTEM_PROMPT
-    # Fiecare cheie poate parcurge tot lanțul de modele o dată (+ marjă pentru cache/503)
-    max_retries = len(keys) * len(MODEL_FALLBACKS_NO_CACHE) + 4
-    last_error = None
-    _model_idx = 0   # poziția curentă în MODEL_FALLBACKS_NO_CACHE
-    _rotations = 0   # câte chei au fost deja epuizate/invalide în ACEST apel
+    max_retries = len(keys) * len(chain) + 6
     _payload_list = list(payload) if isinstance(payload, list) else [payload]
     _has_gfile = any((not isinstance(p, str)) and hasattr(p, "uri") for p in _payload_list)
-    _file_refresh_pending = False  # True => verificăm/re-urcăm fișierele atașate cu cheia curentă
+    _file_refresh_pending = False
     _file_refreshes = 0
-    _deadline = time.time() + 45  # Timeout global: max 45 secunde de reîncercări
-
-    # Încearcă să obțină un cache valid pentru system prompt
-    # _use_cache = True înseamnă că prima încercare va folosi modelul cu caching
-    _use_cache = st.session_state.get("_ctx_cache_enabled", True)
+    _deadline = time.time() + 60
+    _use_cache = use_cache and st.session_state.get("_ctx_cache_enabled", True)
+    _last_kind = None   # "quota" | "overload" | "invalid" | "missing"
 
     for attempt in range(max_retries):
-        if st.session_state.key_index >= len(keys):
-            st.session_state.key_index = 0
-        current_key = keys[st.session_state.key_index]
+        pick = _pick_key_and_model(chain)
+        if pick is None:
+            if _last_kind == "overload":
+                raise Exception("Serviciul AI este supraîncărcat. Te rugăm să încerci din nou în câteva secunde. 🐢")
+            raise Exception(
+                "Toate cheile API sunt epuizate sau invalide pentru azi. "
+                "Cotele se resetează în jurul orei 10:00 (ora României). 🔑"
+            )
+        ki, mi = pick
+        if ki != st.session_state.get("key_index", 0):
+            st.session_state.key_index = ki
+            if _has_gfile:
+                _file_refresh_pending = True   # cheia nouă poate fi în alt proiect Google
+            if attempt > 0:
+                st.toast(f"🔄 Trec pe cheia {ki + 1}/{len(keys)}...", icon="🔑")
+        current_key = keys[ki]
+        model_name = chain[mi]
 
-        # Selectăm modelul: cu caching (prima încercare) sau poziția curentă din lanțul de rezervă
-        cached_content_name = None  # definit înainte de try — folosit și în except
-        _started = False            # True după ce prima bucată a fost emisă către UI (live_stream)
-        if _use_cache and attempt == 0:
-            model_name = MODEL_WITH_CACHE
-        else:
-            model_name = MODEL_FALLBACKS_NO_CACHE[_model_idx]
-
+        cached_content_name = None
+        _started = False
         try:
             gemini_client = genai.Client(api_key=current_key)
 
-            # --- Context Caching ---
-            cached_content_name = None
             if _use_cache and model_name == MODEL_WITH_CACHE:
                 cached_content_name = _get_or_create_cache(gemini_client, active_prompt, current_key)
 
-            # Nivel de gândire (Gemini 3.x): "low" implicit — rapid, potrivit pentru chat
-            # normal. Toggle-ul "🧠 Gândire Extinsă" din sidebar trece pe "high" — util la
-            # probleme complexe, dar mai lent. FIX: fără asta, modelul folosea nivelul
-            # implicit (de obicei "medium"), iar la întrebări de tip paradox/capcană logică
-            # putea intra într-un raționament foarte lung, fără niciun timeout în UI,
-            # lăsând interfața blocată la "scrie..." la nesfârșit.
-            _thinking_level = "high" if st.session_state.get("mod_gandire_extinsa", False) else "low"
-            _thinking_cfg = genai_types.ThinkingConfig(thinking_level=_thinking_level)
-
+            _cfg = dict(
+                safety_settings=[
+                    genai_types.SafetySetting(category=s["category"], threshold=s["threshold"])
+                    for s in safety_settings
+                ],
+                thinking_config=_thinking_config_for(model_name),
+            )
             if cached_content_name:
-                # Apel cu caching: system prompt e deja în cache → nu îl mai trimitem
-                gen_config = genai_types.GenerateContentConfig(
-                    cached_content=cached_content_name,
-                    safety_settings=[
-                        genai_types.SafetySetting(category=s["category"], threshold=s["threshold"])
-                        for s in safety_settings
-                    ],
-                    thinking_config=_thinking_cfg,
-                )
+                gen_config = genai_types.GenerateContentConfig(cached_content=cached_content_name, **_cfg)
             else:
-                # Apel normal (fără caching): trimitem system prompt complet
-                gen_config = genai_types.GenerateContentConfig(
-                    system_instruction=active_prompt,
-                    safety_settings=[
-                        genai_types.SafetySetting(category=s["category"], threshold=s["threshold"])
-                        for s in safety_settings
-                    ],
-                    thinking_config=_thinking_cfg,
-                )
+                gen_config = genai_types.GenerateContentConfig(system_instruction=active_prompt, **_cfg)
 
             history_new = []
             for msg in history_obj:
@@ -5968,85 +6047,74 @@ def run_chat_with_rotation(history_obj, payload, system_prompt=None, live_stream
                 try:
                     if chunk.text:
                         _piece = chunk.text
-                    # Colectăm usage_metadata din ultimul chunk (Gemini îl include la final)
                     if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
                         um = chunk.usage_metadata
-                        if hasattr(um, "prompt_token_count") and um.prompt_token_count:
+                        if getattr(um, "prompt_token_count", None):
                             _prompt_tokens = um.prompt_token_count
-                        if hasattr(um, "candidates_token_count") and um.candidates_token_count:
+                        if getattr(um, "candidates_token_count", None):
                             _output_tokens = um.candidates_token_count
                 except Exception:
                     continue
                 if _piece:
                     if live_stream:
                         _started = True
-                        yield _piece          # elevul vede textul imediat
+                        yield _piece
                     else:
                         chunks.append(_piece)
 
             if live_stream and not _started:
-                # Fără text deloc (ex.: blocat de filtre / răspuns gol) — nu salvăm o bulă goală în chat
                 raise Exception("Modelul nu a returnat niciun text (posibil blocat de filtrele de siguranță).")
-            # Actualizăm contoarele per cheie în session_state
-            _key_id = f"_tokens_key_{st.session_state.get('key_index', 0)}"
+            if not live_stream and not chunks:
+                raise Exception("Modelul nu a returnat niciun text (posibil blocat de filtrele de siguranță).")
+
+            _key_id = f"_tokens_key_{ki}"
             _prev = st.session_state.get(_key_id, {"prompt": 0, "output": 0, "calls": 0})
             st.session_state[_key_id] = {
                 "prompt": _prev["prompt"] + _prompt_tokens,
                 "output": _prev["output"] + _output_tokens,
                 "calls":  _prev["calls"]  + 1,
             }
-
-            # Notă model de rezervă (dar nu pentru modelul de caching care e "normal")
-            if model_name not in (MODEL_WITH_CACHE, MODEL_FALLBACKS_NO_CACHE[0]):
+            if mi > 0:
                 st.toast(f"ℹ️ Răspuns generat cu modelul de rezervă ({model_name})", icon="🔄")
-
-            # Marcăm că caching-ul a funcționat (sau nu) pentru această sesiune
-            st.session_state["_ctx_cache_enabled"] = bool(cached_content_name)
-            # Resetăm contorul de rotații la succes — un apel reușit înseamnă că cheia curentă e OK
-            st.session_state.pop("_quota_rotations", None)
+            if use_cache:
+                st.session_state["_ctx_cache_enabled"] = bool(cached_content_name) if model_name == MODEL_WITH_CACHE \
+                    else st.session_state.get("_ctx_cache_enabled", True)
 
             for text in chunks:
                 yield text
             return
 
         except Exception as e:
-            last_error = e
             if _started:
-                # Elevul a primit deja o parte din răspuns: o reîncercare ar dubla textul.
-                raise
-            # str(e) poate fi gol sau fără codul de eroare — folosim și repr(e)
+                raise   # elevul a primit deja o parte din răspuns: o reîncercare ar dubla textul
             error_msg = str(e) + " " + repr(e)
             _err_low = error_msg.lower()
 
             _is_invalid_key = (
-                "API key not valid" in error_msg
-                or "API_KEY_INVALID" in error_msg
-                or "api_key_invalid" in _err_low
-                or "invalid api key" in _err_low
+                "API key not valid" in error_msg or "API_KEY_INVALID" in error_msg
+                or "api_key_invalid" in _err_low or "invalid api key" in _err_low
             )
-            # \b429\b: nu confundăm cu un "429" din mijlocul altui număr
             _is_quota = (
                 re.search(r"\b429\b", error_msg) is not None
-                or "quota" in _err_low
-                or "rate_limit" in _err_low
-                or "rate limit" in _err_low
+                or "quota" in _err_low or "rate_limit" in _err_low or "rate limit" in _err_low
                 or "resource_exhausted" in _err_low
             )
             _is_overload = ("503" in error_msg or "overloaded" in _err_low or "unavailable" in _err_low)
-            # Fișierul atașat nu e accesibil cu cheia/proiectul curent (403/404 pe files/...)
             _is_file_err = _has_gfile and (
                 "access the file" in _err_low or "files/" in _err_low
                 or ("file" in _err_low and any(x in _err_low for x in ("permission_denied", "not_found", "not found")))
             )
-            _cur_idx = (MODEL_FALLBACKS_NO_CACHE.index(model_name)
-                        if model_name in MODEL_FALLBACKS_NO_CACHE else 0)
+            _is_missing_model = (not _is_file_err) and (
+                re.search(r"\b404\b", error_msg) is not None or "not_found" in _err_low or "not found" in _err_low
+                or "is not supported for generatecontent" in _err_low
+            )
 
-            # Eroare legată de caching (nu de cheie/quota): dezactivăm caching-ul și reîncercăm
+            # Eroare legată de caching: dezactivăm caching-ul și reîncercăm același model
             if (
                 _use_cache and model_name == MODEL_WITH_CACHE
                 and not (_is_invalid_key or _is_quota or _is_file_err)
                 and (
-                    (cached_content_name is None and "400" not in error_msg and not _is_overload)
+                    (cached_content_name is None and "400" not in error_msg and not _is_overload and not _is_missing_model)
                     or "not supported" in _err_low
                     or "cach" in _err_low
                 )
@@ -6061,59 +6129,48 @@ def run_chat_with_rotation(history_obj, payload, system_prompt=None, live_stream
                 _file_refresh_pending = True
                 continue
 
-            if _is_invalid_key or _is_quota:
-                if _is_invalid_key:
-                    _invalidate_cache_for_key(current_key)
-                # Quota Gemini e per MODEL și per PROIECT: încercăm întâi modelul următor
-                # cu aceeași cheie. Doar când lanțul de modele e epuizat rotim cheia.
-                if _is_quota and not _is_invalid_key and _cur_idx < len(MODEL_FALLBACKS_NO_CACHE) - 1:
-                    _model_idx = _cur_idx + 1
-                    st.toast(f"⚠️ Limită atinsă pe {model_name} — încerc {MODEL_FALLBACKS_NO_CACHE[_model_idx]}...", icon="🔄")
-                    continue
-                _rotations += 1
-                if len(keys) <= 1 or _rotations >= len(keys):
-                    raise Exception(
-                        "Toate cheile API sunt epuizate sau invalide. "
-                        "Reîncearcă mai târziu sau adaugă o cheie personală în sidebar. 🔑"
-                    )
-                st.session_state.key_index = (st.session_state.key_index + 1) % len(keys)
-                _model_idx = 0  # cheie nouă -> reluăm lanțul de la modelul principal
-                if _has_gfile:
-                    _file_refresh_pending = True  # cheia nouă poate fi în alt proiect: verificăm fișierul
-                st.toast(f"⚠️ Cheie invalidă/epuizată — schimb la cheia {st.session_state.key_index + 1}...", icon="🔄")
-                time.sleep(0.5)
+            if _is_invalid_key:
+                _last_kind = "invalid"
+                _invalidate_cache_for_key(current_key)
+                _quota_block(current_key, None, time.time() + 3600)
+                _log(f"[AI] cheia {ki + 1} invalidă — ocolită 1 oră", "silent")
                 continue
 
-            elif "400" in error_msg:
-                # 400 fără cheie invalidă = cerere malformată — nu are sens să reîncercăm
+            if _is_quota:
+                _last_kind = "quota"
+                _until = _quota_until_from_error(error_msg)
+                _quota_block(current_key, model_name, _until)
+                _log(f"[AI] cota epuizată: cheia {ki + 1} / {model_name} — ocolită "
+                     f"{int((_until - time.time()) / 60)} min", "silent")
+                st.toast(f"⚠️ Limită atinsă pe {model_name} — încerc altă variantă...", icon="🔄")
+                continue
+
+            if _is_missing_model:
+                _last_kind = "missing"
+                _quota_block(None, model_name, time.time() + 6 * 3600)
+                _log(f"[AI] modelul {model_name} nu e disponibil — scos din lanț 6 ore", "silent", e)
+                continue
+
+            if "400" in error_msg:
                 raise Exception(f"❌ Cerere invalidă (400): {error_msg}") from e
 
-            elif _is_overload:
-                # Supraîncărcarea e de obicei per model: trecem la următorul model dacă mai există
-                if _cur_idx < len(MODEL_FALLBACKS_NO_CACHE) - 1:
-                    _model_idx = _cur_idx + 1
-                    st.toast(f"🐢 {model_name} ocupat — încerc {MODEL_FALLBACKS_NO_CACHE[_model_idx]}...", icon="⏳")
-                    time.sleep(0.5)
-                    continue
+            if _is_overload:
+                _last_kind = "overload"
+                _quota_block(current_key, model_name, time.time() + 30)
                 if time.time() >= _deadline:
                     raise Exception(
                         "Serviciul AI este supraîncărcat. Te rugăm să încerci din nou în câteva secunde. 🐢"
                     ) from e
-                wait = min(0.5 * (2 ** attempt), 5)
-                st.toast("🐢 Server ocupat, reîncerc...", icon="⏳")
-                time.sleep(wait)
+                st.toast(f"🐢 {model_name} ocupat — încerc altă variantă...", icon="⏳")
+                time.sleep(0.5)
                 continue
 
-            else:
-                raise e
+            raise e
 
-    st.session_state.pop("_quota_rotations", None)  # Resetare la epuizare completă
-    friendly_msg = (
+    raise Exception(
         "Ne pare rău, serviciul AI este momentan supraîncărcat. "
-        "Te rugăm să încerci din nou în câteva secunde. "
-        "Dacă problema persistă, verifică cheia API sau încearcă mai târziu. 🙏"
+        "Te rugăm să încerci din nou în câteva secunde. 🙏"
     )
-    raise Exception(friendly_msg)
 
 
 MAX_UPLOAD_FILES = 10
@@ -7090,7 +7147,7 @@ with st.sidebar:
     if _debug_checked:
         msg_count = len(st.session_state.get("messages", []))
         st.caption(f"📊 Mesaje în memorie: {msg_count}/{MAX_MESSAGES_IN_MEMORY}")
-        st.caption(f"🔑 Cheie API activă: {st.session_state.key_index + 1}/{len(keys)}")
+        st.caption(f"🔑 Cheie API activă: {st.session_state.key_index + 1}/{len(keys)} · {quota_status_text()}")
 
         # ── Statistici token usage per cheie (sesiunea curentă) ──
         # Notă: limitele free tier diferă pe model (vezi MODEL_FALLBACKS_NO_CACHE) și se aplică per proiect Google.
