@@ -1542,6 +1542,7 @@ def auth_logout(all_devices: bool = False):
         _log("Ștergere token la deconectare eșuată", "silent", e)
     st.session_state.pop("_auth_user", None)
     st.session_state.pop("_auth_raw_token", None)
+    st.session_state.pop("_acct_keys", None)
     if isinstance(st.session_state.get("_browser_storage"), dict):
         st.session_state["_browser_storage"]["token"] = ""
     _set_browser_token(None)
@@ -1555,6 +1556,123 @@ def auth_logout(all_devices: bool = False):
         st.query_params["sid"] = new_sid
     except Exception:
         pass
+
+
+# --- Cheile API Gemini ale elevului, salvate în cont (criptate) ---
+# Elevul poate adăuga mai multe chei (ex. de la părinți/rude, fiecare cont Google = proiect
+# separat = cote separate). Cheile sunt criptate cu Fernet (AES-128-CBC + HMAC) ÎNAINTE de a
+# ajunge în Supabase. Cheia de criptare: secrets KEYS_ENCRYPTION_SECRET (recomandat); dacă lipsește,
+# e derivată din SUPABASE_KEY. Prefixul textului criptat spune ce cheie a fost folosită.
+MAX_ACCOUNT_KEYS = 10
+
+
+def _fernet_for(tag: str):
+    from cryptography.fernet import Fernet
+    import base64 as _b64
+    if tag == "s1":
+        secret = str(st.secrets.get("KEYS_ENCRYPTION_SECRET", ""))
+    else:
+        secret = "derived:" + str(st.secrets.get("SUPABASE_KEY", ""))
+    if not secret or secret == "derived:":
+        raise RuntimeError("Nu există niciun secret pentru criptarea cheilor")
+    raw = hashlib.sha256(b"profesor-etti-api-keys:" + secret.encode("utf-8")).digest()
+    return Fernet(_b64.urlsafe_b64encode(raw))
+
+
+def _encrypt_api_key(plain: str) -> str:
+    tag = "s1" if st.secrets.get("KEYS_ENCRYPTION_SECRET", "") else "d1"
+    return f"{tag}:" + _fernet_for(tag).encrypt(plain.encode("utf-8")).decode("ascii")
+
+
+def _decrypt_api_key(enc: str) -> str | None:
+    try:
+        tag, token = enc.split(":", 1)
+        return _fernet_for(tag).decrypt(token.encode("ascii")).decode("utf-8")
+    except Exception as e:
+        _log("O cheie API din cont nu a putut fi decriptată", "silent", e)
+        return None
+
+
+def _plausible_api_key(k: str) -> bool:
+    return bool(k) and 15 <= len(k) <= 200 and not any(ch.isspace() for ch in k)
+
+
+def acct_keys_load(force: bool = False) -> list:
+    """Cheile din contul utilizatorului logat: [{id, label, hint, key}] (cache în sesiune)."""
+    uid = current_user_id()
+    if not uid:
+        return []
+    cache = st.session_state.get("_acct_keys")
+    if cache is not None and not force and cache.get("uid") == uid:
+        return cache["items"]
+    items = []
+    try:
+        res = get_supabase_client().table("etti_api_keys").select("id, label, key_enc, key_hint, created_at") \
+            .eq("user_id", uid).order("created_at").execute()
+        for r in res.data or []:
+            k = _decrypt_api_key(r["key_enc"])
+            if k:
+                items.append({"id": r["id"], "label": r.get("label") or "Cheie", "hint": r.get("key_hint") or "", "key": k})
+    except Exception as e:
+        _log("Cheile din cont nu au putut fi încărcate", "silent", e)
+        return (cache or {}).get("items", [])
+    st.session_state["_acct_keys"] = {"uid": uid, "items": items}
+    return items
+
+
+def _check_api_key_live(k: str) -> tuple[bool, str]:
+    """Verifică cheia la Google fără să consume din cota de generare (models.get)."""
+    try:
+        genai.Client(api_key=k).models.get(model=GEMINI_MODEL)
+        return True, ""
+    except Exception as e:
+        low = (str(e) + repr(e)).lower()
+        if "api_key_invalid" in low or "api key not valid" in low or "invalid api key" in low:
+            return False, "Google spune că cheia nu e validă. Verifică să o fi copiat complet."
+        if "permission_denied" in low or "403" in low:
+            return False, "Cheia nu are acces la Gemini API (activează „Generative Language API” în proiect)."
+        return True, "Nu am putut verifica acum cheia la Google; am salvat-o oricum."
+
+
+def acct_key_add(label: str, key: str) -> tuple[bool, str]:
+    uid = current_user_id()
+    if not uid:
+        return False, "Trebuie să fii conectat la cont."
+    key = (key or "").strip().strip('"').strip("'")
+    if not _plausible_api_key(key):
+        return False, "Cheie invalidă: fără spații, minim 15 caractere."
+    existing = acct_keys_load(force=True)
+    if any(it["key"] == key for it in existing):
+        return False, "Cheia aceasta e deja salvată în cont."
+    if len(existing) >= MAX_ACCOUNT_KEYS:
+        return False, f"Poți salva cel mult {MAX_ACCOUNT_KEYS} chei."
+    ok, note = _check_api_key_live(key)
+    if not ok:
+        return False, note
+    try:
+        get_supabase_client().table("etti_api_keys").insert({
+            "user_id": uid,
+            "label": (label or "").strip()[:40] or f"Cheia {len(existing) + 1}",
+            "key_enc": _encrypt_api_key(key),
+            "key_hint": key[-4:],
+            "created_at": time.time(),
+        }).execute()
+    except Exception as e:
+        _log("Salvarea cheii în cont a eșuat", "silent", e)
+        return False, "Cheia nu a putut fi salvată acum. Încearcă din nou."
+    acct_keys_load(force=True)
+    return True, note
+
+
+def acct_key_delete(key_id: str):
+    uid = current_user_id()
+    if not uid:
+        return
+    try:
+        get_supabase_client().table("etti_api_keys").delete().eq("id", key_id).eq("user_id", uid).execute()
+    except Exception as e:
+        _log("Ștergerea cheii din cont a eșuat", "silent", e)
+    acct_keys_load(force=True)
 
 
 def _resolve_session_for_user(sid: str) -> str:
@@ -2306,18 +2424,197 @@ if raw_keys_secrets:
                 if clean_k:
                     keys.append(clean_k)
 
-# Adaugă cheia studentului la final (folosită când celelalte se epuizează)
+# Cheile salvate în contul elevului (mama, tata, rude...) — rotite automat când se epuizează
+_acct_items = acct_keys_load() if current_user() else []
+for _it in _acct_items:
+    if _it["key"] not in keys:
+        keys.append(_it["key"])
+
+# Adaugă cheia studentului salvată doar în browser (folosită când celelalte se epuizează)
 if saved_manual_key and saved_manual_key not in keys:
     keys.append(saved_manual_key)
 
 # ── Pasul 3: UI în sidebar pentru cheia manuală ──
 # Afișăm secțiunea DOAR dacă nu există chei configurate în secrets
-_are_secrets_keys = len([k for k in keys if k != saved_manual_key]) > 0
+def _render_account_ui():
+    """Secțiunea „👤 Cont” din bara laterală (login, cont nou, resetare parolă, ieșire)."""
+    # --- Cont (opțional) ---
+    _user = current_user()
+    if _user:
+        st.markdown(f"👤 **{_user['name']}**  \n<small>{_user['email']}</small>", unsafe_allow_html=True)
+        st.caption("Conversațiile tale sunt salvate în cont și apar pe orice dispozitiv.")
+        _rec_show = st.session_state.get("_auth_new_recovery")
+        if _rec_show:
+            st.warning("🔑 **Codul tău de recuperare** — notează-l! Cu el îți poți reseta parola "
+                       "dacă o uiți. Îl vezi doar acum.", icon="⚠️")
+            st.code(_rec_show, language=None)
+            st.download_button("⬇️ Salvează codul (.txt)", key="_rec_dl",
+                               data=(f"Profesor ETTI — cod de recuperare\nCont: {_user['email']}\n"
+                                     f"Cod: {_rec_show}\n").encode("utf-8"),
+                               file_name="profesor_etti_cod_recuperare.txt", use_container_width=True)
+            st.button("✅ Am notat codul", key="_rec_ok", on_click=_dismiss_recovery, use_container_width=True)
+        else:
+            with st.expander("🔑 Cod de recuperare", expanded=False):
+                st.caption("Dacă nu mai ai codul de recuperare, generează unul nou "
+                           "(cel vechi nu va mai funcționa).")
+                if st.button("Generează cod nou", key="_rec_new", use_container_width=True):
+                    if not auth_regenerate_recovery():
+                        st.error("Nu am putut genera codul acum.")
+                    st.rerun()
+        _lo1, _lo2 = st.columns(2)
+        with _lo1:
+            if st.button("🚪 Ieșire", key="_auth_logout", use_container_width=True):
+                auth_logout()
+                st.rerun()
+        with _lo2:
+            if st.button("Ieșire peste tot", key="_auth_logout_all", use_container_width=True,
+                         help="Deconectează contul de pe toate dispozitivele"):
+                auth_logout(all_devices=True)
+                st.rerun()
+    else:
+        with st.expander("👤 Cont — conversațiile tale pe orice dispozitiv", expanded=False):
+            _tab_in, _tab_new, _tab_reset = st.tabs(["Intră în cont", "Cont nou", "Am uitat parola"])
+            with _tab_in:
+                with st.form("_auth_login_form", clear_on_submit=False):
+                    _le = st.text_input("Email", key="_auth_login_email", autocomplete="email")
+                    _lp = st.text_input("Parolă", type="password", key="_auth_login_pw",
+                                        autocomplete="current-password")
+                    _lr = st.checkbox("Ține-mă minte pe acest dispozitiv", value=True, key="_auth_login_rem")
+                    if st.form_submit_button("Intră", type="primary", use_container_width=True):
+                        _u, _err = auth_login(_le, _lp)
+                        if _u:
+                            auth_complete_login(_u, _lr)
+                            st.rerun()
+                        else:
+                            st.error(_err)
+            with _tab_new:
+                with st.form("_auth_register_form", clear_on_submit=False):
+                    _rn = st.text_input("Nume (opțional)", key="_auth_reg_name", max_chars=60)
+                    _re_ = st.text_input("Email", key="_auth_reg_email", autocomplete="email")
+                    _rp = st.text_input(f"Parolă (minim {AUTH_MIN_PASSWORD} caractere)", type="password",
+                                        key="_auth_reg_pw", autocomplete="new-password")
+                    _rp2 = st.text_input("Repetă parola", type="password", key="_auth_reg_pw2",
+                                         autocomplete="new-password")
+                    _rr = st.checkbox("Ține-mă minte pe acest dispozitiv", value=True, key="_auth_reg_rem")
+                    st.caption("Conversațiile din acest browser vor fi mutate în contul nou.")
+                    if st.form_submit_button("Creează cont", type="primary", use_container_width=True):
+                        if _rp != _rp2:
+                            st.error("Parolele nu coincid.")
+                        else:
+                            _u, _err = auth_register(_re_, _rp, _rn)
+                            if _u:
+                                auth_complete_login(_u, _rr)
+                                st.rerun()
+                            else:
+                                st.error(_err)
+            with _tab_reset:
+                if _smtp_config():
+                    with st.form("_auth_reset_mail_form"):
+                        st.markdown("**1.** Primește un cod pe email")
+                        _rme = st.text_input("Email", key="_auth_reset_mail_email", autocomplete="email")
+                        if st.form_submit_button("📧 Trimite codul", use_container_width=True):
+                            _sent, _msg = auth_request_reset_email(_rme)
+                            (st.success if _sent else st.error)(_msg)
+                    st.markdown("**2.** Introdu codul din email *sau* codul de recuperare")
+                else:
+                    st.caption("Introdu codul de recuperare primit la crearea contului.")
+                with st.form("_auth_reset_form"):
+                    _xe = st.text_input("Email", key="_auth_reset_email", autocomplete="email")
+                    _xc = st.text_input("Cod (6 cifre din email sau XXXX-XXXX-XXXX)", key="_auth_reset_code")
+                    _xp = st.text_input(f"Parolă nouă (minim {AUTH_MIN_PASSWORD} caractere)", type="password",
+                                        key="_auth_reset_pw", autocomplete="new-password")
+                    _xp2 = st.text_input("Repetă parola nouă", type="password", key="_auth_reset_pw2",
+                                         autocomplete="new-password")
+                    if st.form_submit_button("Schimbă parola", type="primary", use_container_width=True):
+                        if _xp != _xp2:
+                            st.error("Parolele nu coincid.")
+                        else:
+                            _u, _err = auth_reset_password(_xe, _xc, _xp)
+                            if _u:
+                                auth_complete_login(_u, True)
+                                st.toast("✅ Parola a fost schimbată. Celelalte dispozitive au fost deconectate.",
+                                         icon="🔑")
+                                st.rerun()
+                            else:
+                                st.error(_err)
+
+
+_acct_key_set = {it["key"] for it in _acct_items}
+_are_secrets_keys = len([k for k in keys if k != saved_manual_key and k not in _acct_key_set]) > 0
+
+_KEY_GUIDE_MD = """
+**Pasul 1** — Deschide Google AI Studio (butonul de mai sus) și autentifică-te cu contul Google.
+
+**Pasul 2** — Apasă **"Create API key"** (buton albastru); dacă ți se cere, alege **"Create API key in new project"**.
+
+**Pasul 3** — Copiază cheia afișată (`AIzaSy...` sau `AQ.Ab8R...`) și lipește-o mai jos.
+
+💡 Fiecare cont Google are cota lui gratuită (cereri pe minut și pe zi). Cu chei din mai multe conturi
+(ex. de la părinți sau rude care nu le folosesc) ai de atâtea ori mai multe întrebări pe zi.
+"""
+
+
+def _render_account_keys_ui():
+    """Cheile din cont: listă cu 🗑️ + formular de adăugare (vizibil doar pentru utilizatorii logați)."""
+    st.subheader("🔑 Cheile tale API Google AI")
+    items = acct_keys_load()
+    if items:
+        st.caption(f"{len(items)} {'cheie salvată' if len(items) == 1 else 'chei salvate'} în cont, pe orice dispozitiv. "
+                   "Când una își termină cota, trece automat la următoarea.")
+        for it in items:
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                st.markdown(f"🔑 **{it['label']}** · <small>…{it['hint']}</small>", unsafe_allow_html=True)
+            with c2:
+                st.button("🗑️", key=f"_acct_key_del_{it['id']}", help=f"Șterge cheia „{it['label']}”",
+                          on_click=acct_key_delete, args=(it["id"],))
+    else:
+        st.caption("Nu ai încă nicio cheie salvată în cont.")
+
+    if saved_manual_key and saved_manual_key not in _acct_key_set and len(items) < MAX_ACCOUNT_KEYS:
+        st.info("Ai o cheie salvată doar în acest browser.")
+        if st.button("☁️ Mut-o în cont", key="_acct_key_move", use_container_width=True):
+            _ok, _note = acct_key_add("Cheia mea", saved_manual_key)
+            if _ok:
+                st.session_state.pop("_manual_api_key", None)
+                st.session_state["_kb_synced"] = True
+                st.session_state["_kb_cmd"] = {"op": "clear", "n": secrets.token_hex(4)}
+                st.rerun()
+            else:
+                st.error(_note)
+
+    if len(items) < MAX_ACCOUNT_KEYS:
+        with st.expander("➕ Adaugă o cheie", expanded=not items and not saved_manual_key):
+            st.link_button("🌐 Ia o cheie gratuită din Google AI Studio", "https://aistudio.google.com/apikey",
+                           use_container_width=True)
+            with st.popover("❓ Cum obțin o cheie?", use_container_width=True):
+                st.markdown(_KEY_GUIDE_MD)
+            with st.form("_acct_key_add_form", clear_on_submit=True):
+                _lbl = st.text_input("Al cui cont Google e cheia?", placeholder="ex: Mama, Tata, Bunicul",
+                                     max_chars=40, key="_acct_key_label")
+                _val = st.text_input("Cheia API", type="password", placeholder="AIzaSy... sau AQ.Ab8R...",
+                                     key="_acct_key_value")
+                if st.form_submit_button("✅ Adaugă în cont", type="primary", use_container_width=True):
+                    _ok, _note = acct_key_add(_lbl, _val)
+                    if _ok:
+                        st.session_state["_acct_key_flash"] = ("ok", _note or "✅ Cheie adăugată în cont.")
+                        st.rerun()
+                    else:
+                        st.error(_note)
+    _flash = st.session_state.pop("_acct_key_flash", None)
+    if _flash:
+        (st.success if _flash[0] == "ok" else st.warning)(_flash[1])
+
 
 with st.sidebar:
-    if not _are_secrets_keys:
+    if current_user():
+        st.divider()
+        _render_account_keys_ui()
+    elif not _are_secrets_keys:
         st.divider()
         st.subheader("🔑 Cheie API Google AI")
+        st.caption("💡 Cu un cont (👤 Cont, mai sus) poți salva mai multe chei — de exemplu de la părinți — "
+                   "și le ai pe orice dispozitiv.")
 
         if not saved_manual_key:
             # ── Ghid vizual — vizibil DOAR când nu există cheie salvată ──
@@ -2391,7 +2688,12 @@ with st.sidebar:
                 st.rerun()
 
 if not keys:
-    st.error("❌ Nicio cheie API validă. Introdu cheia ta Google AI în bara laterală.")
+    # Fără cheie: lăsăm totuși login-ul disponibil — elevul își poate recupera cheile din cont.
+    with st.sidebar:
+        st.divider()
+        _render_account_ui()
+    st.error("❌ Nicio cheie API validă. Introdu cheia ta Google AI în bara laterală "
+             "sau intră în cont (👤 Cont) dacă ți-ai salvat cheile acolo.")
     st.stop()
 
 if "key_index" not in st.session_state:
@@ -6251,105 +6553,7 @@ else:
         st.caption(f"Materie selectată: **{_mat_label}**")
 
 with st.sidebar:
-    # --- Cont (opțional) ---
-    _user = current_user()
-    if _user:
-        st.markdown(f"👤 **{_user['name']}**  \n<small>{_user['email']}</small>", unsafe_allow_html=True)
-        st.caption("Conversațiile tale sunt salvate în cont și apar pe orice dispozitiv.")
-        _rec_show = st.session_state.get("_auth_new_recovery")
-        if _rec_show:
-            st.warning("🔑 **Codul tău de recuperare** — notează-l! Cu el îți poți reseta parola "
-                       "dacă o uiți. Îl vezi doar acum.", icon="⚠️")
-            st.code(_rec_show, language=None)
-            st.download_button("⬇️ Salvează codul (.txt)", key="_rec_dl",
-                               data=(f"Profesor ETTI — cod de recuperare\nCont: {_user['email']}\n"
-                                     f"Cod: {_rec_show}\n").encode("utf-8"),
-                               file_name="profesor_etti_cod_recuperare.txt", use_container_width=True)
-            st.button("✅ Am notat codul", key="_rec_ok", on_click=_dismiss_recovery, use_container_width=True)
-        else:
-            with st.expander("🔑 Cod de recuperare", expanded=False):
-                st.caption("Dacă nu mai ai codul de recuperare, generează unul nou "
-                           "(cel vechi nu va mai funcționa).")
-                if st.button("Generează cod nou", key="_rec_new", use_container_width=True):
-                    if not auth_regenerate_recovery():
-                        st.error("Nu am putut genera codul acum.")
-                    st.rerun()
-        _lo1, _lo2 = st.columns(2)
-        with _lo1:
-            if st.button("🚪 Ieșire", key="_auth_logout", use_container_width=True):
-                auth_logout()
-                st.rerun()
-        with _lo2:
-            if st.button("Ieșire peste tot", key="_auth_logout_all", use_container_width=True,
-                         help="Deconectează contul de pe toate dispozitivele"):
-                auth_logout(all_devices=True)
-                st.rerun()
-    else:
-        with st.expander("👤 Cont — conversațiile tale pe orice dispozitiv", expanded=False):
-            _tab_in, _tab_new, _tab_reset = st.tabs(["Intră în cont", "Cont nou", "Am uitat parola"])
-            with _tab_in:
-                with st.form("_auth_login_form", clear_on_submit=False):
-                    _le = st.text_input("Email", key="_auth_login_email", autocomplete="email")
-                    _lp = st.text_input("Parolă", type="password", key="_auth_login_pw",
-                                        autocomplete="current-password")
-                    _lr = st.checkbox("Ține-mă minte pe acest dispozitiv", value=True, key="_auth_login_rem")
-                    if st.form_submit_button("Intră", type="primary", use_container_width=True):
-                        _u, _err = auth_login(_le, _lp)
-                        if _u:
-                            auth_complete_login(_u, _lr)
-                            st.rerun()
-                        else:
-                            st.error(_err)
-            with _tab_new:
-                with st.form("_auth_register_form", clear_on_submit=False):
-                    _rn = st.text_input("Nume (opțional)", key="_auth_reg_name", max_chars=60)
-                    _re_ = st.text_input("Email", key="_auth_reg_email", autocomplete="email")
-                    _rp = st.text_input(f"Parolă (minim {AUTH_MIN_PASSWORD} caractere)", type="password",
-                                        key="_auth_reg_pw", autocomplete="new-password")
-                    _rp2 = st.text_input("Repetă parola", type="password", key="_auth_reg_pw2",
-                                         autocomplete="new-password")
-                    _rr = st.checkbox("Ține-mă minte pe acest dispozitiv", value=True, key="_auth_reg_rem")
-                    st.caption("Conversațiile din acest browser vor fi mutate în contul nou.")
-                    if st.form_submit_button("Creează cont", type="primary", use_container_width=True):
-                        if _rp != _rp2:
-                            st.error("Parolele nu coincid.")
-                        else:
-                            _u, _err = auth_register(_re_, _rp, _rn)
-                            if _u:
-                                auth_complete_login(_u, _rr)
-                                st.rerun()
-                            else:
-                                st.error(_err)
-            with _tab_reset:
-                if _smtp_config():
-                    with st.form("_auth_reset_mail_form"):
-                        st.markdown("**1.** Primește un cod pe email")
-                        _rme = st.text_input("Email", key="_auth_reset_mail_email", autocomplete="email")
-                        if st.form_submit_button("📧 Trimite codul", use_container_width=True):
-                            _sent, _msg = auth_request_reset_email(_rme)
-                            (st.success if _sent else st.error)(_msg)
-                    st.markdown("**2.** Introdu codul din email *sau* codul de recuperare")
-                else:
-                    st.caption("Introdu codul de recuperare primit la crearea contului.")
-                with st.form("_auth_reset_form"):
-                    _xe = st.text_input("Email", key="_auth_reset_email", autocomplete="email")
-                    _xc = st.text_input("Cod (6 cifre din email sau XXXX-XXXX-XXXX)", key="_auth_reset_code")
-                    _xp = st.text_input(f"Parolă nouă (minim {AUTH_MIN_PASSWORD} caractere)", type="password",
-                                        key="_auth_reset_pw", autocomplete="new-password")
-                    _xp2 = st.text_input("Repetă parola nouă", type="password", key="_auth_reset_pw2",
-                                         autocomplete="new-password")
-                    if st.form_submit_button("Schimbă parola", type="primary", use_container_width=True):
-                        if _xp != _xp2:
-                            st.error("Parolele nu coincid.")
-                        else:
-                            _u, _err = auth_reset_password(_xe, _xc, _xp)
-                            if _u:
-                                auth_complete_login(_u, True)
-                                st.toast("✅ Parola a fost schimbată. Celelalte dispozitive au fost deconectate.",
-                                         icon="🔑")
-                                st.rerun()
-                            else:
-                                st.error(_err)
+    _render_account_ui()
     st.divider()
 
     st.header("⚙️ Opțiuni")

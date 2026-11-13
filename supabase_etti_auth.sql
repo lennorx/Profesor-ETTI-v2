@@ -63,3 +63,17 @@ create table if not exists public.etti_password_resets (
 alter table public.etti_password_resets enable row level security;
 revoke all on public.etti_password_resets from anon, authenticated;
 -- ROLLBACK: drop table public.etti_password_resets; alter table public.etti_users drop column recovery_hash;
+
+-- ── Cheile API Gemini ale elevului, salvate în cont (criptate în aplicație cu Fernet) ──
+create table if not exists public.etti_api_keys (
+    id         uuid primary key default gen_random_uuid(),
+    user_id    uuid not null references public.etti_users(id) on delete cascade,
+    label      text,                     -- ex. „Mama”, „Tata”
+    key_enc    text not null,            -- „s1:<fernet>” (KEYS_ENCRYPTION_SECRET) sau „d1:<fernet>” (derivat)
+    key_hint   text,                     -- ultimele 4 caractere, pentru afișare
+    created_at double precision not null
+);
+create index if not exists idx_etti_api_keys_user_id on public.etti_api_keys(user_id);
+alter table public.etti_api_keys enable row level security;
+revoke all on public.etti_api_keys from anon, authenticated;
+-- ROLLBACK: drop table public.etti_api_keys;

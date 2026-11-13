@@ -5,3 +5,4 @@ Pillow>=10.0.0
 lxml>=5.0.0
 python-docx
 dbfread
+cryptography>=42
