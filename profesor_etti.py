@@ -1675,6 +1675,109 @@ def acct_key_delete(key_id: str):
     acct_keys_load(force=True)
 
 
+# --- Citirea cheii API dintr-o poză / captură de ecran ---
+# Cheile sunt lungi (AIza... 39 de caractere) și greu de tastat pe telefon. OCR-ul clasic (Tesseract)
+# confundă I/l/1 și O/0, deci folosim Gemini. Ce cheie folosim pentru citire: oricare cheie deja
+# disponibilă (secrets / cont / browser) sau OCR_API_KEY din secrets — o cheie a ta, folosită DOAR
+# aici, ca elevul să-și poată citi prima cheie din poză. Limită: 10 poze / sesiune.
+_KEY_PATTERNS = [re.compile(r"AIza[0-9A-Za-z_\-]{35}"), re.compile(r"AQ\.[0-9A-Za-z_\-\.]{20,200}")]
+KEY_PHOTO_MAX_PER_SESSION = 10
+
+
+def _find_api_key_in_text(text: str) -> str | None:
+    flat = re.sub(r"\s+", "", text or "")
+    for pat in _KEY_PATTERNS:
+        m = pat.search(flat)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _ocr_keys_available(extra_keys: list) -> list:
+    pool = [k for k in (extra_keys or []) if k]
+    try:
+        ocr = str(st.secrets.get("OCR_API_KEY", "")).strip()
+    except Exception:
+        ocr = ""
+    if ocr and ocr not in pool:
+        pool.append(ocr)
+    return pool
+
+
+def _read_api_key_from_image(data: bytes, mime: str, pool: list) -> tuple[str | None, str]:
+    """Returnează (cheia, mesaj). Încearcă pe rând cheile disponibile × 3 modele mici."""
+    if not pool:
+        return None, ("Citirea din poză are nevoie de o cheie deja configurată. Adaug-o o dată prin copy-paste "
+                      "(de pe calculator, de exemplu) — dacă ești logat, apare apoi automat și pe telefon.")
+    n = st.session_state.get("_key_photo_count", 0)
+    if n >= KEY_PHOTO_MAX_PER_SESSION:
+        return None, "Ai atins limita de poze citite în această sesiune. Lipește cheia manual."
+    st.session_state["_key_photo_count"] = n + 1
+    prompt = ("Imaginea conține o cheie API Google (începe cu „AIza” sau cu „AQ.”). Transcrie DOAR cheia, exact, "
+              "caracter cu caracter, fără spații și fără alt text. Atenție la caracterele asemănătoare: "
+              "O (litera) / 0 (cifra), l (L mic) / I (i mare) / 1, S / 5, Z / 2. "
+              "Dacă nu vezi nicio cheie, răspunde exact: NIMIC")
+    models = [GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-2.5-flash-lite"]
+    last_err = ""
+    for k in pool[:4]:
+        for m in models:
+            try:
+                cfg = genai_types.GenerateContentConfig(
+                    thinking_config=(genai_types.ThinkingConfig(thinking_budget=0) if m.startswith("gemini-2.5")
+                                     else genai_types.ThinkingConfig(thinking_level="low")))
+                resp = genai.Client(api_key=k).models.generate_content(
+                    model=m,
+                    contents=[genai_types.Part.from_bytes(data=data, mime_type=mime or "image/jpeg"), prompt],
+                    config=cfg,
+                )
+                found = _find_api_key_in_text(getattr(resp, "text", "") or "")
+                if found:
+                    return found, ""
+                return None, "Nu am găsit nicio cheie în poză. Încearcă o poză mai clară, doar cu cheia, sau lipește-o."
+            except Exception as e:
+                last_err = str(e)
+                low = last_err.lower()
+                if "429" in low or "quota" in low or "resource_exhausted" in low or "404" in low \
+                        or "not found" in low or "503" in low or "unavailable" in low:
+                    continue          # model/cheie indisponibile → următoarea variantă
+                break                 # cheie invalidă etc. → trecem la cheia următoare
+    _log("Citirea cheii din poză a eșuat", "silent", Exception(last_err))
+    return None, "Nu am putut citi poza acum (serviciul AI e ocupat). Încearcă din nou sau lipește cheia."
+
+
+def _key_photo_reader(target_key: str, pool: list):
+    """Uploader „📷 poză cu cheia”: citește cheia și o pune în câmpul `target_key` (înainte ca acesta să fie randat)."""
+    up = st.file_uploader("📷 Sau încarcă o poză / captură de ecran cu cheia",
+                          type=["jpg", "jpeg", "png", "webp", "heic", "heif"], key=f"{target_key}__photo",
+                          help="Pe telefon poți face direct o poză ecranului calculatorului cu cheia afișată.")
+    if not up:
+        return
+    sig = (up.name, up.size)
+    if st.session_state.get(f"{target_key}__photo_sig") == sig:
+        return
+    st.session_state[f"{target_key}__photo_sig"] = sig
+    with st.spinner("🔍 Citesc cheia din poză..."):
+        found, note = _read_api_key_from_image(up.getvalue(), up.type, pool)
+    if not found:
+        st.session_state[f"{target_key}__photo_msg"] = ("error", note)
+        return
+    ok, why = _check_api_key_live(found)
+    st.session_state[target_key] = found
+    if ok:
+        st.session_state[f"{target_key}__photo_msg"] = (
+            "ok", f"✅ Am citit cheia (…{found[-4:]}) și Google o acceptă. Apasă butonul de mai jos ca s-o salvezi.")
+    else:
+        st.session_state[f"{target_key}__photo_msg"] = (
+            "warn", f"⚠️ Am citit „…{found[-6:]}”, dar Google nu o acceptă — probabil un caracter citit greșit. "
+                    "Verifică-l în câmp sau lipește cheia manual.")
+
+
+def _key_photo_message(target_key: str):
+    msg = st.session_state.pop(f"{target_key}__photo_msg", None)
+    if msg:
+        {"ok": st.success, "warn": st.warning, "error": st.error}[msg[0]](msg[1])
+
+
 def _resolve_session_for_user(sid: str) -> str:
     """Înregistrează sid-ul dacă e nou. Dacă aparține ALTUI cont, nu îl deschidem: pornim o
     conversație nouă (ID-ul din link nu mai e suficient pentru a citi conversația unui cont)."""
@@ -2589,11 +2692,14 @@ def _render_account_keys_ui():
                            use_container_width=True)
             with st.popover("❓ Cum obțin o cheie?", use_container_width=True):
                 st.markdown(_KEY_GUIDE_MD)
+            _key_photo_reader("_acct_key_value", _ocr_keys_available(keys))
+            _key_photo_message("_acct_key_value")
             with st.form("_acct_key_add_form", clear_on_submit=True):
                 _lbl = st.text_input("Al cui cont Google e cheia?", placeholder="ex: Mama, Tata, Bunicul",
                                      max_chars=40, key="_acct_key_label")
                 _val = st.text_input("Cheia API", type="password", placeholder="AIzaSy... sau AQ.Ab8R...",
-                                     key="_acct_key_value")
+                                     key="_acct_key_value",
+                                     help="Lipește cheia sau folosește poza de mai sus — se completează singură.")
                 if st.form_submit_button("✅ Adaugă în cont", type="primary", use_container_width=True):
                     _ok, _note = acct_key_add(_lbl, _val)
                     if _ok:
@@ -2645,11 +2751,14 @@ with st.sidebar:
 
             # ── Câmpul de input și butonul de salvare ──
             st.caption("Cheia se salvează în browserul tău și rămâne activă după refresh.")
+            _key_photo_reader("_manual_key_input", _ocr_keys_available(keys))
+            _key_photo_message("_manual_key_input")
             new_key = st.text_input(
                 "Cheie API Google AI:",
                 type="password",
                 placeholder="AIzaSy... sau AQ.Ab8R...",
                 label_visibility="collapsed",
+                key="_manual_key_input",
             )
             if st.button("✅ Salvează cheia", use_container_width=True, type="primary", key="save_api_key"):
                 clean = new_key.strip().strip('"').strip("'")
