@@ -23,6 +23,14 @@ _key_bridge = (
     if (_KEY_BRIDGE_DIR / "index.html").exists() else None
 )
 
+# Pod localStorage -> Python pentru ID-ul conversației (restaurarea istoricului pe orice browser).
+# Fișierul session_bridge/index.html trebuie pus în repo, lângă acest script.
+_SESSION_BRIDGE_DIR = pathlib.Path(__file__).resolve().parent / "session_bridge"
+_session_bridge = (
+    components.declare_component("profesor_session_bridge", path=str(_SESSION_BRIDGE_DIR))
+    if (_SESSION_BRIDGE_DIR / "index.html").exists() else None
+)
+
 # === IMPORTURI PENTRU TIPURI NOI DE FIȘIERE ===
 # python-docx pentru .docx/.doc
 try:
@@ -1266,75 +1274,56 @@ def get_or_create_session_id() -> str:
         return existing_in_state
 
     # ── GATE: URL complet curat, fără SID nicăieri ──
-    # Nu generăm și nu folosim SID-ul nou în acest run. Cerem browserului să verifice
-    # localStorage ÎNAINTE de a continua orice logică Python (care altfel ar încărca
-    # un istoric gol pe baza unui SID fantomă).
+    # Citim din localStorage SID-ul salvat (și lista de conversații ale browserului) prin
+    # componenta session_bridge, care TRIMITE valorile spre Python. Înainte, un script încerca
+    # window.parent.location.replace(...) din iframe-ul components.html; iframe-ul e izolat
+    # (sandbox), iar Chrome/Edge blochează navigarea paginii-părinte → pagina rămânea blocată
+    # la „Se încarcă...” și istoricul nu se mai restaura. Acum nu mai navigăm deloc:
+    # Python primește SID-ul, îl pune în ?sid= și rularea continuă normal.
     candidate_id = generate_unique_session_id()
     _force_new = st.query_params.get("new", "") == "1"
 
-    st.markdown(
-        '<div style="display:flex;align-items:center;justify-content:center;'
-        'min-height:40vh;color:#888;font-size:15px;">🎓 Se încarcă...</div>',
-        unsafe_allow_html=True,
-    )
-    components.html(f"""
-    <script>
-    (function() {{
-        const SID_KEY    = 'profesor_session_id';
-        const KNOWN_KEY  = 'profesor_known_sessions';
-        const candidate  = {json.dumps(candidate_id)};
-        const forceNew   = {json.dumps(_force_new)};
-        const params     = new URLSearchParams(window.parent.location.search);
+    _stored = None
+    if _session_bridge is not None:
+        _stored = _session_bridge(key="_session_bridge", default=None)
+        if _stored is None:
+            # Componenta nu a răspuns încă (primul run): ecran de încărcare scurt.
+            st.markdown(
+                '<div style="display:flex;align-items:center;justify-content:center;'
+                'min-height:40vh;color:#888;font-size:15px;">🎓 Se încarcă...</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption("Dacă pagina rămâne aici mai mult de câteva secunde, apasă mai jos "
+                       "(pornește o conversație nouă).")
+            if st.button("🔄 Continuă", key="_session_gate_manual_continue"):
+                st.session_state["session_id"] = candidate_id
+                st.rerun()
+            st.stop()
 
-        const storedSid = forceNew ? null : localStorage.getItem(SID_KEY);
+    _stored = _stored if isinstance(_stored, dict) else {}
+    _stored_sid = str(_stored.get("sid") or "")
+    if not _force_new and is_valid_session_id(_stored_sid):
+        sid = _stored_sid          # browserul a mai folosit aplicația → restaurăm conversația
+    else:
+        sid = candidate_id         # vizită nouă (sau ?new=1 / stocare blocată)
 
-        if (storedSid && storedSid.length >= 16) {{
-            // Sesiune veche găsită în localStorage — o restaurăm direct, fără să
-            // mai trecem deloc prin SID-ul fantomă generat de Python la acest run.
-            params.set('sid', storedSid);
-            params.delete('new');
-            params.delete('apikey');
-            // FIX PERSISTENȚĂ LISTĂ CONVERSAȚII: trimitem și lista de sesiuni
-            // cunoscute ale acestui browser, ca Python să poată reconstrui
-            // sidebar-ul "Conversații anterioare" chiar după un restart real.
-            try {{
-                let known = JSON.parse(localStorage.getItem(KNOWN_KEY) || '[]');
-                if (Array.isArray(known) && known.length > 0) {{
-                    params.set('known', known.join(','));
-                }}
-            }} catch (e) {{ /* ignorăm — lista se reconstruiește din mers */ }}
-        }} else {{
-            // Vizită cu adevărat nouă (sau forțată) — confirmăm SID-ul candidat.
-            localStorage.setItem(SID_KEY, candidate);
-            params.set('sid', candidate);
-            params.delete('new');
-            params.delete('apikey');
-        }}
-        const redirectUrl = window.parent.location.pathname + '?' + params.toString();
-        window.parent.location.replace(redirectUrl);
-    }})();
-    </script>
-    """, height=0)
+    _known_ids = [s for s in (_stored.get("known") or []) if isinstance(s, str) and is_valid_session_id(s)]
+    if _known_ids:
+        _existing = set(st.session_state.get("_my_session_ids", []))
+        st.session_state["_my_session_ids"] = list(_existing.union(_known_ids))
 
-    # FIX SIGURANȚĂ: pe unele browsere mobile (Safari iOS cu storage partitioning
-    # agresiv, sau iframe-uri izolate), accesul JS la window.parent.location poate fi
-    # blocat silențios — userul ar rămâne blocat pe acest ecran la infinit. Oferim un
-    # buton manual de continuare, care apare imediat și nu depinde de JS cross-frame:
-    # apasă → setăm direct ?sid= din Python (fără să mai așteptăm localStorage) și
-    # continuăm cu SID-ul candidat ca sesiune nouă.
-    st.caption(
-        "Dacă pagina nu se reîncarcă automat în câteva secunde, apasă mai jos. "
-        "Notă: dacă ai mai folosit aplicația pe acest telefon, așteaptă puțin — "
-        "butonul pornește o conversație nouă, nu recuperează automat istoricul vechi."
-    )
-    if st.button("🔄 Continuă", key="_session_gate_manual_continue"):
-        try:
-            st.query_params["sid"] = candidate_id
-        except Exception:
-            pass
-        st.rerun()
-
-    st.stop()
+    if not session_exists_in_db(sid):
+        register_session(sid)
+    if st.session_state.get("_sb_online", True):
+        st.session_state.setdefault("_sid_registered", set()).add(sid)
+    st.session_state["session_id"] = sid
+    try:
+        if "new" in st.query_params:
+            del st.query_params["new"]
+        st.query_params["sid"] = sid   # Streamlit actualizează URL-ul fără reîncărcare
+    except Exception:
+        pass
+    return sid
 
 
 # === MEMORY MANAGEMENT (FIX MEMORY LEAK) ===
