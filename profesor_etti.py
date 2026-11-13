@@ -11,6 +11,8 @@ import random
 import re
 import hashlib
 import hmac
+import smtplib
+from email.message import EmailMessage
 import secrets
 import threading
 from collections import defaultdict
@@ -1215,13 +1217,16 @@ def auth_register(email: str, password: str, display_name: str = "") -> tuple[di
         if exists.data:
             return None, "Există deja un cont cu acest email. Folosește „Intră în cont”."
         now = time.time()
+        _rec = _new_recovery_code()
         res = client.table("etti_users").insert({
             "email": email,
             "password_hash": _hash_password(password),
+            "recovery_hash": _hash_password(_normalize_recovery(_rec)),
             "display_name": (display_name or "").strip()[:60] or None,
             "created_at": now,
             "last_login": now,
         }).execute()
+        st.session_state["_auth_new_recovery"] = _rec   # afișat o singură dată după creare
         return _public_user(res.data[0]), ""
     except Exception as e:
         _log("Înregistrare cont eșuată", "silent", e)
@@ -1250,6 +1255,177 @@ def auth_login(email: str, password: str) -> tuple[dict | None, str]:
     except Exception:
         pass
     return _public_user(row), ""
+
+
+# --- Resetare parolă: cod prin email (Gmail SMTP) + cod de recuperare ---
+RESET_CODE_MINUTES = 15
+RESET_MAX_ATTEMPTS = 5
+RESET_EMAIL_COOLDOWN = 60        # secunde între două emailuri către aceeași adresă
+_RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # fără 0/O, 1/I
+
+
+def _new_recovery_code() -> str:
+    raw = "".join(secrets.choice(_RECOVERY_ALPHABET) for _ in range(12))
+    return f"{raw[:4]}-{raw[4:8]}-{raw[8:]}"
+
+
+def _normalize_recovery(code: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (code or "").upper())
+
+
+def _reset_code_hash(user_id: str, code: str) -> str:
+    return hashlib.sha256(f"{user_id}:{code}".encode("utf-8")).hexdigest()
+
+
+def _smtp_config() -> dict | None:
+    try:
+        user = st.secrets.get("SMTP_USER", "")
+        pw = st.secrets.get("SMTP_PASSWORD", "")
+        if not user or not pw:
+            return None
+        return {"user": user, "password": str(pw).replace(" ", ""),
+                "host": st.secrets.get("SMTP_HOST", "smtp.gmail.com"),
+                "port": int(st.secrets.get("SMTP_PORT", 465)),
+                "sender": st.secrets.get("SMTP_FROM_NAME", "Profesor ETTI")}
+    except Exception:
+        return None
+
+
+def _send_email(to: str, subject: str, body: str) -> bool:
+    cfg = _smtp_config()
+    if not cfg:
+        return False
+    msg = EmailMessage()
+    msg["From"] = f"{cfg['sender']} <{cfg['user']}>"
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(body)
+    try:
+        with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=20) as srv:
+            srv.login(cfg["user"], cfg["password"])
+            srv.send_message(msg)
+        return True
+    except Exception as e:
+        _log("Trimiterea emailului a eșuat", "silent", e)
+        return False
+
+
+@st.cache_resource
+def _get_reset_mail_store() -> dict:
+    return {"lock": threading.Lock(), "last": {}}
+
+
+def auth_request_reset_email(email: str) -> tuple[bool, str]:
+    """Trimite un cod de 6 cifre pe email. Mesajul e același dacă emailul există sau nu
+    (nu dezvăluim ce adrese au cont)."""
+    email = (email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        return False, "Adresa de email nu pare validă."
+    if not _smtp_config():
+        return False, "Trimiterea de emailuri nu e configurată. Folosește codul de recuperare."
+    store = _get_reset_mail_store()
+    with store["lock"]:
+        if time.time() - store["last"].get(email, 0) < RESET_EMAIL_COOLDOWN:
+            return False, "Ți-am trimis deja un cod. Verifică emailul (și Spam) sau încearcă peste un minut."
+        store["last"][email] = time.time()
+    generic = (f"Dacă există un cont cu {email}, am trimis un cod de 6 cifre (valabil "
+               f"{RESET_CODE_MINUTES} minute). Verifică și folderul Spam.")
+    client = get_supabase_client()
+    if client is None:
+        return False, "Baza de date nu e disponibilă acum. Încearcă mai târziu."
+    try:
+        res = client.table("etti_users").select("id").eq("email", email).limit(1).execute()
+        if not res.data:
+            return True, generic
+        uid = res.data[0]["id"]
+        code = f"{secrets.randbelow(10 ** 6):06d}"
+        now = time.time()
+        client.table("etti_password_resets").upsert({
+            "user_id": uid, "code_hash": _reset_code_hash(uid, code),
+            "expires_at": now + RESET_CODE_MINUTES * 60, "attempts": 0, "created_at": now,
+        }).execute()
+    except Exception as e:
+        _log("Cerere resetare parolă: eroare DB", "silent", e)
+        return False, "Nu am putut genera codul acum. Încearcă din nou."
+    body = (f"Salut!\n\nCodul tău pentru resetarea parolei în Profesor ETTI este:\n\n    {code}\n\n"
+            f"Codul e valabil {RESET_CODE_MINUTES} minute. Dacă nu ai cerut tu resetarea, "
+            "ignoră acest email — parola ta rămâne neschimbată.\n")
+    if not _send_email(email, f"Codul tău Profesor ETTI: {code}", body):
+        return False, "Emailul nu a putut fi trimis acum. Încearcă din nou sau folosește codul de recuperare."
+    return True, generic
+
+
+def auth_reset_password(email: str, code: str, new_password: str) -> tuple[dict | None, str]:
+    """Schimbă parola folosind codul din email (6 cifre) SAU codul de recuperare.
+    La succes: toate dispozitivele sunt deconectate; dacă s-a folosit codul de recuperare,
+    se generează unul nou (pus în st.session_state["_auth_new_recovery"])."""
+    email = (email or "").strip().lower()
+    code = (code or "").strip()
+    if len(new_password or "") < AUTH_MIN_PASSWORD:
+        return None, f"Parola nouă trebuie să aibă cel puțin {AUTH_MIN_PASSWORD} caractere."
+    if _auth_blocked(email):
+        return None, "Prea multe încercări greșite. Așteaptă 10 minute."
+    bad = "Email sau cod greșit (ori codul a expirat)."
+    client = get_supabase_client()
+    if client is None:
+        return None, "Baza de date nu e disponibilă acum. Încearcă mai târziu."
+    try:
+        res = client.table("etti_users").select("id, email, display_name, recovery_hash") \
+            .eq("email", email).limit(1).execute()
+        row = res.data[0] if res.data else None
+        if not row:
+            _auth_note_fail(email)
+            return None, bad
+        uid = row["id"]
+        used_recovery = False
+        if re.fullmatch(r"\d{6}", code):
+            r = client.table("etti_password_resets").select("code_hash, expires_at, attempts") \
+                .eq("user_id", uid).limit(1).execute()
+            rr = r.data[0] if r.data else None
+            if (not rr or rr["expires_at"] < time.time() or rr["attempts"] >= RESET_MAX_ATTEMPTS
+                    or not hmac.compare_digest(rr["code_hash"], _reset_code_hash(uid, code))):
+                if rr:
+                    client.table("etti_password_resets").update({"attempts": rr["attempts"] + 1}) \
+                        .eq("user_id", uid).execute()
+                _auth_note_fail(email)
+                return None, bad
+        else:
+            if not row.get("recovery_hash") or not _verify_password(_normalize_recovery(code), row["recovery_hash"]):
+                _auth_note_fail(email)
+                return None, bad
+            used_recovery = True
+        update = {"password_hash": _hash_password(new_password), "last_login": time.time()}
+        if used_recovery:
+            new_rec = _new_recovery_code()        # codul de recuperare e de unică folosință
+            update["recovery_hash"] = _hash_password(_normalize_recovery(new_rec))
+        client.table("etti_users").update(update).eq("id", uid).execute()
+        client.table("etti_password_resets").delete().eq("user_id", uid).execute()
+        client.table("etti_tokens").delete().eq("user_id", uid).execute()   # deconectăm peste tot
+        if used_recovery:
+            st.session_state["_auth_new_recovery"] = new_rec
+        return _public_user(row), ""
+    except Exception as e:
+        _log("Resetare parolă eșuată", "silent", e)
+        return None, "Parola nu a putut fi schimbată acum. Încearcă din nou."
+
+
+def auth_regenerate_recovery() -> bool:
+    uid = current_user_id()
+    if not uid:
+        return False
+    rec = _new_recovery_code()
+    try:
+        get_supabase_client().table("etti_users").update(
+            {"recovery_hash": _hash_password(_normalize_recovery(rec))}).eq("id", uid).execute()
+        st.session_state["_auth_new_recovery"] = rec
+        return True
+    except Exception as e:
+        _log("Cod de recuperare nou eșuat", "silent", e)
+        return False
+
+
+def _dismiss_recovery():
+    st.session_state.pop("_auth_new_recovery", None)
 
 
 def _issue_remember_token(user_id: str) -> str | None:
@@ -5934,6 +6110,24 @@ with st.sidebar:
     if _user:
         st.markdown(f"👤 **{_user['name']}**  \n<small>{_user['email']}</small>", unsafe_allow_html=True)
         st.caption("Conversațiile tale sunt salvate în cont și apar pe orice dispozitiv.")
+        _rec_show = st.session_state.get("_auth_new_recovery")
+        if _rec_show:
+            st.warning("🔑 **Codul tău de recuperare** — notează-l! Cu el îți poți reseta parola "
+                       "dacă o uiți. Îl vezi doar acum.", icon="⚠️")
+            st.code(_rec_show, language=None)
+            st.download_button("⬇️ Salvează codul (.txt)", key="_rec_dl",
+                               data=(f"Profesor ETTI — cod de recuperare\nCont: {_user['email']}\n"
+                                     f"Cod: {_rec_show}\n").encode("utf-8"),
+                               file_name="profesor_etti_cod_recuperare.txt", use_container_width=True)
+            st.button("✅ Am notat codul", key="_rec_ok", on_click=_dismiss_recovery, use_container_width=True)
+        else:
+            with st.expander("🔑 Cod de recuperare", expanded=False):
+                st.caption("Dacă nu mai ai codul de recuperare, generează unul nou "
+                           "(cel vechi nu va mai funcționa).")
+                if st.button("Generează cod nou", key="_rec_new", use_container_width=True):
+                    if not auth_regenerate_recovery():
+                        st.error("Nu am putut genera codul acum.")
+                    st.rerun()
         _lo1, _lo2 = st.columns(2)
         with _lo1:
             if st.button("🚪 Ieșire", key="_auth_logout", use_container_width=True):
@@ -5946,7 +6140,7 @@ with st.sidebar:
                 st.rerun()
     else:
         with st.expander("👤 Cont — conversațiile tale pe orice dispozitiv", expanded=False):
-            _tab_in, _tab_new = st.tabs(["Intră în cont", "Cont nou"])
+            _tab_in, _tab_new, _tab_reset = st.tabs(["Intră în cont", "Cont nou", "Am uitat parola"])
             with _tab_in:
                 with st.form("_auth_login_form", clear_on_submit=False):
                     _le = st.text_input("Email", key="_auth_login_email", autocomplete="email")
@@ -5977,6 +6171,36 @@ with st.sidebar:
                             _u, _err = auth_register(_re_, _rp, _rn)
                             if _u:
                                 auth_complete_login(_u, _rr)
+                                st.rerun()
+                            else:
+                                st.error(_err)
+            with _tab_reset:
+                if _smtp_config():
+                    with st.form("_auth_reset_mail_form"):
+                        st.markdown("**1.** Primește un cod pe email")
+                        _rme = st.text_input("Email", key="_auth_reset_mail_email", autocomplete="email")
+                        if st.form_submit_button("📧 Trimite codul", use_container_width=True):
+                            _sent, _msg = auth_request_reset_email(_rme)
+                            (st.success if _sent else st.error)(_msg)
+                    st.markdown("**2.** Introdu codul din email *sau* codul de recuperare")
+                else:
+                    st.caption("Introdu codul de recuperare primit la crearea contului.")
+                with st.form("_auth_reset_form"):
+                    _xe = st.text_input("Email", key="_auth_reset_email", autocomplete="email")
+                    _xc = st.text_input("Cod (6 cifre din email sau XXXX-XXXX-XXXX)", key="_auth_reset_code")
+                    _xp = st.text_input(f"Parolă nouă (minim {AUTH_MIN_PASSWORD} caractere)", type="password",
+                                        key="_auth_reset_pw", autocomplete="new-password")
+                    _xp2 = st.text_input("Repetă parola nouă", type="password", key="_auth_reset_pw2",
+                                         autocomplete="new-password")
+                    if st.form_submit_button("Schimbă parola", type="primary", use_container_width=True):
+                        if _xp != _xp2:
+                            st.error("Parolele nu coincid.")
+                        else:
+                            _u, _err = auth_reset_password(_xe, _xc, _xp)
+                            if _u:
+                                auth_complete_login(_u, True)
+                                st.toast("✅ Parola a fost schimbată. Celelalte dispozitive au fost deconectate.",
+                                         icon="🔑")
                                 st.rerun()
                             else:
                                 st.error(_err)

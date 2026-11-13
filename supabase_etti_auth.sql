@@ -50,3 +50,16 @@ revoke all on public.session_previews from anon, authenticated;
 -- (atenție: CREATE OR REPLACE nu poate elimina o coloană — pentru rollback: DROP VIEW apoi CREATE VIEW)
 -- alter table public.sessions drop column etti_user_id;
 -- drop table public.etti_tokens; drop table public.etti_users;
+
+-- ── Resetare parolă (cod prin email + cod de recuperare) ──
+alter table public.etti_users add column if not exists recovery_hash text;   -- scrypt(cod de recuperare)
+create table if not exists public.etti_password_resets (
+    user_id    uuid primary key references public.etti_users(id) on delete cascade,
+    code_hash  text not null,              -- hmac-sha256 al codului de 6 cifre trimis pe email
+    expires_at double precision not null,  -- 15 minute
+    attempts   integer not null default 0, -- max 5 încercări
+    created_at double precision not null
+);
+alter table public.etti_password_resets enable row level security;
+revoke all on public.etti_password_resets from anon, authenticated;
+-- ROLLBACK: drop table public.etti_password_resets; alter table public.etti_users drop column recovery_hash;
