@@ -2818,11 +2818,12 @@ st.session_state["_api_keys_list"] = keys
 
 # === MATERII ===
 MATERII = {
-    # ETTI (UPB) — trunchi comun, generația 2024-2028.
-    # Sursă: planuri de învățământ oficiale ETTI, extrase direct din PDF-urile
-    # ELA-24-28 / TST-24-28 / RST-24-28 / MON-24-28 / INF-24-28.
-    # Anii I-II sunt identici pentru ELA/TST/RST/MON; la INF (Ingineria Informației)
-    # unele discipline au denumiri diferite — marcate mai jos cu „(INF: ...)”.
+    # ETTI (UPB) — trunchi comun anii I-II.
+    # Verificat (14 nov. 2026) pe etti.upb.ro → „Planuri de învățământ licență”: generațiile
+    # 2024-2028, 2025-2029 (anul II în 2026-2027) și 2026-2030 (anul I) au ACELEAȘI discipline
+    # obligatorii în anii I-II. Conținuturile: fise-discipline.etti.upb.ro (cap. 10).
+    # Anii I-II sunt identici pentru ELA/TST/RST/MON (și variantele în engleză); la INF
+    # (Ingineria Informației) unele discipline diferă — marcate cu „(INF: ...)” / „(An X, INF)”.
     "🤖 Automat":                                 None,  # detectează disciplina din mesaj, întreabă dacă nu poate
 
     # --- ANUL I ---
@@ -2834,8 +2835,9 @@ MATERII = {
     "🧪 Chimie (An I)":                                  "chimie facultate",
     "📐 Matematici Speciale (An I)":                     "matematici speciale",
     "📏 Măsurări în Electronică și Telecomunicații (An I) (INF: Măsurători Electronice, Senzori și Traductoare)": "măsurări în electronică și telecomunicații",
-    "🧱 Materiale pentru Electronică (An I) (INF: Sisteme de Operare 1)": "materiale pentru electronică",
+    "🧱 Materiale pentru Electronică (An I) (nu la INF — vezi Sisteme de Operare 1)": "materiale pentru electronică",
     "🖥️ Informatică Aplicată (An I, Proiect)":          "informatică aplicată",
+    "🐧 Sisteme de Operare 1 (An I, INF)": "sisteme de operare",
 
     # --- ANUL II ---
     "📶 Semnale și Sisteme (An II)":                     "semnale și sisteme",
@@ -2843,10 +2845,17 @@ MATERII = {
     "🧮 Arhitectura Microprocesoarelor (An II)":         "arhitectura microprocesoarelor",
     "🔩 Componente și Circuite Pasive (An II)":          "componente și circuite pasive",
     "🧮 Structuri de Date și Algoritmi (An II)":         "structuri de date și algoritmi",
-    "🔌 Circuite Electronice Fundamentale (An II) (INF: parte din Electronică Digitală)": "circuite electronice fundamentale",
+    "🔌 Circuite Electronice Fundamentale (An II) (INF: Dispozitive Electronice și Electronică Analogică 2)": "circuite electronice fundamentale",
     "💾 Circuite Integrate Digitale (An II) (nu la INF — vezi Electronică Digitală)": "circuite integrate digitale",
+    "⚙️ Electronică Digitală (An II, INF)": "electronică digitală",
     "🎲 Teoria Probabilităților și Statistică Matematică (An II)": "teoria probabilităților și statistică matematică",
     "🗄️ Baze de Date (An II)":                          "baze de date",
+    # --- ANUL II — DISCIPLINE OPȚIONALE TEHNICE (studentul alege una din fiecare pachet) ---
+    "📐 Grafică Asistată de Calculator — CAD/3D (An II, opțional)": "grafică asistată de calculator",
+    "🐍 Programare 3 — Proiect Python / Matlab (An II, opțional)": "programare python și matlab",
+    "📈 Modele SPICE (An II, opțional)": "modele spice",
+    "🛠️ Tehnici CAD pentru Module Electronice / Tehnologii de Interconectare (An II, opțional)": "tehnici cad pentru module electronice",
+    "☕ Programare Orientată pe Obiecte — Java / Android (An II, opțional)": "programare orientată pe obiecte",
 }
 # NOTĂ: la finalul anului II, disciplinele se ramifică pe specializare (ELA/TST/RST/MON/INF).
 # Se adaugă blocurile aferente în MATERII + _PROMPT_SUBJECTS pe măsură ce studentul avansează.
@@ -3730,8 +3739,8 @@ _PROMPT_SUBJECTS: dict[str, str] = {
 
     "materiale pentru electronică": r"""
     1. MATERIALE PENTRU ELECTRONICĂ — ANUL I ETTI/UPB (Semestrul II):
-       (INF: în locul acestei discipline au "Sisteme de Operare 1" — conținut diferit,
-       nu confunda dacă un student INF întreabă)
+       (INF: în locul acestei discipline au "Sisteme de Operare 1" — materie separată în aplicație;
+       dacă un student INF întreabă despre Linux/shell, nu răspunde din perspectiva acestei materii)
 
        NOTAȚII OBLIGATORII:
        - Rezistivitate: ρ (Ω·m); conductivitate: σ = 1/ρ (S/m)
@@ -4376,7 +4385,8 @@ _PROMPT_SUBJECTS: dict[str, str] = {
 
     "circuite electronice fundamentale": r"""
     1. CIRCUITE ELECTRONICE FUNDAMENTALE — ANUL II ETTI/UPB (Semestrul II):
-       (INF: parte din "Electronică Digitală" — la INF conținutul analogic e mai restrâns)
+       (INF: echivalent cu "Dispozitive Electronice și Electronică Analogică 2" — aceleași
+       capitole, plus stabilizatoare în comutație și oscilatoare de relaxare; vezi mai jos)
        Extinde Dispozitive Electronice (BJT, MOSFET individuale) spre CIRCUITE cu tranzistoare:
        amplificatoare, reacție, amplificatorul operațional.
 
@@ -4461,6 +4471,37 @@ _PROMPT_SUBJECTS: dict[str, str] = {
        - Clasa AB: compromis — reduce distorsiunea de trecere prin zero, cu eficiență
          intermediară între A și B
 
+       ══════════════════════════════════════════
+       OSCILATOARE ARMONICE (cap. 4 din fișa disciplinei)
+       ══════════════════════════════════════════
+       - Definiție: circuit care generează un semnal periodic fără semnal de intrare — amplificator
+         + rețea de reacție POZITIVĂ selectivă în frecvență
+       - Condiția Barkhausen: |A·β| = 1 și faza(A·β) = 0° (sau 360°) la frecvența de oscilație;
+         la pornire |A·β| ușor > 1, apoi amplitudinea e limitată neliniar (teoria liniară,
+         cuasiliniară și neliniară)
+       - Oscilatoare RC: cu punte Wien (f₀ = 1/(2πRC), amplificator cu câștig 3), cu rețea de
+         defazare (3 celule RC)
+       - Oscilatoare LC: Colpitts (divizor capacitiv), Hartley (divizor inductiv), f₀ = 1/(2π√(LC));
+         oscilatoare cu cuarț pentru stabilitate mare a frecvenței
+
+       ══════════════════════════════════════════
+       STABILIZATOARE DE TENSIUNE (cap. 5 din fișa disciplinei)
+       ══════════════════════════════════════════
+       - Parametri: coeficient de stabilizare față de intrare, rezistență de ieșire (stabilizare
+         față de sarcină), coeficient de temperatură, randament
+       - Stabilizator parametric: diodă Zener + rezistor de balast — dimensionarea rezistorului
+         pentru curentul minim prin Zener la sarcină maximă
+       - Stabilizatoare cu element de control SERIE (tranzistor între intrare și ieșire) și
+         DERIVAȚIE (în paralel cu sarcina); stabilizatoare cu reacție (referință + amplificator de
+         eroare + element de control); stabilizatoare integrate (78xx, LM317: V_out = 1.25·(1+R2/R1))
+       - Protecții la scurtcircuit și suprasarcină (limitare de curent, fold-back)
+
+       (INF — „Dispozitive electronice și electronică analogică 2” are același conținut,
+       plus: STABILIZATOARE ÎN COMUTAȚIE — comutatoare cu tranzistoare, topologii flyback,
+       forward, semipunte, comparație cu cele liniare (randament mare vs. zgomot/riplu); și
+       OSCILATOARE DE RELAXARE — cu AO și reacție pozitivă (comparator cu histerezis + RC),
+       cu alimentare simetrică și cu o singură alimentare. Tratează-le când studentul de la INF întreabă.)
+
        CAPCANE FRECVENTE:
        - Confuzia model de semnal MIC (pentru analiza AC, liniarizat în jurul punctului static)
          cu analiza DC completă (neliniară) — se folosesc în etape SEPARATE, nu amestecate
@@ -4475,7 +4516,8 @@ _PROMPT_SUBJECTS: dict[str, str] = {
 
     "circuite integrate digitale": r"""
     1. CIRCUITE INTEGRATE DIGITALE — ANUL II ETTI/UPB (Semestrul II):
-       (NU există separat la INF — conținutul e integrat în "Electronică Digitală")
+       (NU există la INF — acolo e "Electronică Digitală", materie separată în aplicație,
+       cu abordare pe ordine de sisteme și Verilog)
        Extinde MOSFET-ul ca și comutator (din Dispozitive Electronice) spre logica digitală
        completă: porți logice, algebră booleană, circuite combinaționale și secvențiale.
 
@@ -4989,6 +5031,293 @@ _PROMPT_SUBJECTS: dict[str, str] = {
          string gol în comparații SQL (NULL are semantică specială, necesită IS NULL)
     """,
 
+    "sisteme de operare": r"""
+    1. SISTEME DE OPERARE 1 — ANUL I ETTI/UPB, PROGRAMUL INGINERIA INFORMAȚIEI (INF), Semestrul II:
+       (Disciplină DOAR la INF, în locul „Materiale pentru electronică” de la ELA/TST/RST/MON.
+       Curs 2h + laborator 1.5h, verificare. Curs orientat pe UTILIZAREA practică a Linux.)
+
+       CONVENȚII OBLIGATORII:
+       - Comenzi și scripturi ÎNTOTDEAUNA în blocuri ```bash (sau ```sh); ieșirea comenzii,
+         dacă o arăți, într-un bloc separat ```text
+       - Promptul în exemple: `student@vm:~$` pentru utilizator normal, `root@vm:~#` pentru root —
+         explică diferența $ vs # când apare prima dată
+       - Distribuție implicită în exemple: Ubuntu/Debian (apt). Când contează, menționează
+         echivalentul (dnf/yum la Fedora/RHEL, pacman la Arch)
+       - NU recomanda comenzi distructive (rm -rf /, chmod -R 777 /, dd pe disc) fără avertisment
+         clar; la `sudo` explică DE CE e nevoie de privilegii
+
+       STRUCTURA OBLIGATORIE la o întrebare practică:
+       **1. Ce vrem să obținem** (o propoziție)
+       **2. Comanda / scriptul** — în bloc de cod
+       **3. Explicația fiecărei părți** — opțiuni, argumente, redirectări, pipe-uri
+       **4. Cum verific** că a mers (ls -l, echo $?, cat, ps...)
+       **5. Greșeli tipice** pentru acel caz
+
+       ══════════════════════════════════════════
+       TEMATICA CURSULUI (conform fișei disciplinei)
+       ══════════════════════════════════════════
+       - Rolul sistemului de operare; istoric; exemple (Windows, Linux, BSD, Android);
+         interfețe (CLI vs GUI)
+       - Instalarea unei mașini virtuale cu Linux: partiționare, formatare, verificarea
+         instalării, distribuții, managerul de pachete (apt install/remove/update/upgrade);
+         noțiuni de virtualizare, mașini virtuale în browser
+       - Linia de comandă: shell, prompt, comenzi și argumente, istoric, completare cu Tab,
+         înlănțuiri de comenzi (;  &&  ||  |), redirectări (>  >>  <  2>  2>&1)
+       - Arhitectura sistemului de calcul (procesor, memorie, I/O) și a sistemului de operare:
+         nucleu monolitic vs. micronucleu, drivere, spațiu utilizator vs. spațiu nucleu, apeluri de sistem
+       - Pornirea sistemului (firmware/BIOS-UEFI → bootloader → kernel → init/systemd)
+       - Sistemul de fișiere Linux: ierarhia FHS (/, /home, /etc, /bin, /usr, /var, /tmp, /dev,
+         /proc), căi absolute vs. relative, ., .., ~; comenzi: ls, cd, pwd, mkdir, cp, mv, rm,
+         touch, cat, less, head, tail, find, locate, ln (legături hard vs. simbolice)
+       - Editoare în linie de comandă: nano (simplu), vim (moduri: normal/inserare/comandă; :wq, :q!)
+       - Utilizatori, grupuri, permisiuni: rwx pentru u/g/o, notație octală (chmod 755, 644),
+         chown, sudo, /etc/passwd, /etc/group; umask
+       - Arhivare și compresie: tar (-c/-x/-t, -z/-j/-J, -f), gzip, zip
+       - Procese: ps, top/htop, pid, părinte/copil, foreground/background (&, jobs, fg, bg),
+         semnale (kill -SIGTERM/-SIGKILL, Ctrl+C = SIGINT, Ctrl+Z = SIGTSTP), nice
+       - Variabile de mediu (PATH, HOME, export), substituții ($(...), $VAR, ${VAR}),
+         filtre text: grep, sort, uniq, wc, cut, tr, sed, awk (elementar)
+       - Scripturi Bash: shebang, chmod +x, argumente ($1, $#, $@), if/test [ ], for, while,
+         funcții, cod de ieșire ($?); expresii regulate (grep -E)
+       - Rețea: ip a, ping, ssh (conectarea la mașină), scp, configurare de bază
+       - Aspecte avansate (nivel introductiv): sistem virtual de fișiere, montare (mount, /etc/fstab),
+         securitate, virtualizare vs. containerizare (Docker — idee generală)
+       - Dezvoltarea aplicațiilor: compilare (gcc), linkare, interpretare, medii de dezvoltare;
+         gestiunea codului sursă (git: init, add, commit, log, branch, clone); licențe software
+         (open source vs. gratuit, GPL/MIT — diferența de idee)
+
+       CAPCANE FRECVENTE:
+       - Spații în nume de fișiere fără ghilimele; confuzia > (suprascrie) cu >> (adaugă)
+       - chmod 777 „ca să meargă” — explică de ce e o practică proastă
+       - Rularea unui script fără permisiunea x sau fără ./ în față (directorul curent nu e în PATH)
+       - Confuzia legătură hard / simbolică; ștergerea țintei unei legături simbolice
+       - kill -9 ca primă opțiune (SIGKILL nu lasă procesul să facă curățenie)
+       - În Bash: spații obligatorii în [ "$a" = "$b" ] și FĂRĂ spații la atribuire (x=5)
+    """,
+    "electronică digitală": r"""
+    1. ELECTRONICĂ DIGITALĂ — ANUL II ETTI/UPB, PROGRAMUL INGINERIA INFORMAȚIEI (INF), Semestrul II:
+       (La INF înlocuiește „Circuite integrate digitale”. Curs 2h + seminar 0.5h + laborator 2h, examen.
+       Abordarea cursului: sisteme digitale clasificate după NUMĂRUL DE BUCLE (G. Ștefan,
+       „Loops & Complexity in Digital Systems”), cu descriere în Verilog HDL.)
+
+       NOTAȚII ȘI CONVENȚII:
+       - Nivele logice '0'/'1'; operatori: AND (·), OR (+), NOT (¯ sau '), XOR (⊕)
+       - Tabele de adevăr și tabele de tranziții în format markdown
+       - Cod Verilog ÎNTOTDEAUNA în blocuri ```verilog; stil: module ... endmodule, porturi declarate
+         explicit (input/output, [n-1:0]), atribuiri continue cu assign pentru logică combinațională,
+         always @(posedge clk) cu atribuiri NEBLOCANTE (<=) pentru logică secvențială
+       - Diagrame de stări descrise textual (Stare → condiție → stare următoare / ieșire)
+
+       ══════════════════════════════════════════
+       TEMATICA (conform fișei disciplinei)
+       ══════════════════════════════════════════
+       - INTRODUCERE: analog vs. digital, numeric vs. logic, aritmetică binară (complement față
+         de 2, depășire), funcții logice, relația dimensiune–complexitate a unui circuit
+       - SISTEME DE ORDINUL 0 (fără bucle) = CIRCUITE COMBINAȚIONALE: porți elementare;
+         structuri generice: decodificator, demultiplexor, multiplexor, ROM (ca tabel de adevăr);
+         structuri funcționale: incrementor, sumator/scăzător, ALU; minimizare (Karnaugh)
+       - SISTEME DE ORDINUL 1 (o buclă) = CIRCUITE DE MEMORARE: latch elementar, latch cu ceas,
+         data-latch; principiul Master-Slave; registrul (D flip-flop), registru paralel-paralel,
+         serie-paralel; RAM asincron, RAM sincron, register file
+       - SISTEME DE ORDINUL 2 (două bucle) = AUTOMATE FINITE: clasificare (Moore/Mealy),
+         codificarea stărilor (binar, one-hot, Gray), implementare (registru de stare + logică
+         de tranziție + logică de ieșire); automate simple: T flip-flop, numărătoare, RALU,
+         program counter
+       - SISTEME DE ORDINUL 3 (trei bucle) = PROCESOARE: automate finite realizate cu numărătoare;
+         „toyProcessor” (RALU + PC) — cum se leagă calea de date de unitatea de control
+       - SISTEME DE ORDINUL 4 (patru bucle) = CALCULATOARE: modelul abstract von Neumann vs. Harvard
+       - Ideea centrală de transmis: fiecare buclă nouă adaugă un nivel de AUTONOMIE
+         (0 bucle = funcție; 1 = memorie; 2 = automat; 3 = procesor; 4 = calculator)
+
+       STRUCTURĂ LA EXERCIȚII:
+       - Combinațional: tabel de adevăr → expresie → minimizare → schemă / modul Verilog
+       - Automat: specificație → diagramă de stări → codificare → ecuații de tranziție și ieșire
+         → implementare (schemă cu bistabile D sau Verilog cu always + case)
+       - Verifică ÎNTOTDEAUNA cu câteva combinații de intrare / o secvență de tact
+
+       CAPCANE FRECVENTE:
+       - Atribuiri blocante (=) în always secvențial → simulare diferită de hardware
+       - Latch-uri deduse accidental în Verilog (if fără else / case fără default în logica combinațională)
+       - Confuzia latch (pe nivel) vs. flip-flop (pe front); confuzia Moore (ieșire din stare) vs.
+         Mealy (ieșire din stare + intrare)
+       - Bucle combinaționale neintenționate (ieșire legată înapoi la intrare fără registru)
+    """,
+    "grafică asistată de calculator": r"""
+    1. GRAFICĂ ASISTATĂ DE CALCULATOR — ANUL II ETTI/UPB, Semestrul I (DISCIPLINĂ OPȚIONALĂ):
+       Trei variante în plan (studentul alege una): „Tehnici CAD pentru electronică”,
+       „Modelare și design 3D” (curs 1h + laborator 1h) și „Proiect CAD pentru electronică” (proiect).
+       Întreabă studentul ce variantă are dacă nu reiese din întrebare.
+
+       A) CAD PENTRU ELECTRONICĂ (proiectare de module/plăci — flux CAE-CAD-CAM):
+       - Fluxul complet: listă de componente → biblioteci de componente virtuale (simbol + capsulă)
+         → schemă electronică (SCH) → verificări electrice (ERC) → transfer SCH → PCB (netlist)
+         → plasare → rutare → verificări (DRC) → fișiere de fabricație (Gerber, drill, BOM, pick&place)
+       - Crearea/editarea componentelor după foaia de catalog (datasheet): pini, simbol, footprint;
+         capsule THT vs. SMD (0805, SOIC, QFN...)
+       - Reguli de proiectare: lățimea traseelor după curent, distanțe (clearance), via-uri,
+         plan de masă, decuplare (condensator lângă pinul de alimentare), trasee scurte pentru
+         semnale rapide, separarea analog/digital
+       - Instrumente uzuale (menționează doar dacă ajută): KiCad (gratuit), Altium, OrCAD/Allegro, Eagle
+
+       B) MODELARE ȘI DESIGN 3D (Autodesk Inventor Professional):
+       - CAD-CAE-CAM, imprimare 3D; interfața Inventor, principii de modelare parametrică,
+         arhitectura unui proiect (piese .ipt, ansambluri .iam, desene .idw)
+       - Schițe 2D: comenzi de desenare, constrângeri GEOMETRICE (paralel, perpendicular, tangent,
+         coincident...) și DIMENSIONALE; schița complet constrânsă
+       - Modelare 3D: extrudare, revoluție, găurire, racordare (fillet), teșire (chamfer), shell,
+         matrice (pattern); piese cu pereți subțiri — Sheet Metal
+       - Asamblare: constrângeri de asamblare (mate, flush, insert), simulare dinamică
+       - Desene de execuție: vederi, secțiuni, cotare, standarde de reprezentare tehnică
+
+       STIL: pași numerotați, ca o procedură de urmat în program; numește comanda exactă din meniu
+       când o știi, altfel descrie funcția. NU inventa nume de meniuri pentru versiuni pe care nu le cunoști.
+
+       CAPCANE FRECVENTE:
+       - Schițe sub-constrânse (se deformează la modificare); footprint care nu corespunde capsulei reale
+       - Lipsa decuplării sau a planului de masă; trasee de putere prea subțiri
+       - Gerber generate fără verificarea DRC; unități amestecate (mil vs. mm)
+    """,
+    "programare python și matlab": r"""
+    1. PROGRAMAREA CALCULATOARELOR ȘI LIMBAJE DE PROGRAMARE 3 — PROIECT PYTHON / PROIECT MATLAB
+       — ANUL II ETTI/UPB, Semestrul I (DISCIPLINĂ OPȚIONALĂ, proiect 1h/săpt., verificare):
+       Studentul alege Python SAU Matlab. Întreabă dacă nu reiese din întrebare.
+
+       CONVENȚII:
+       - Cod în blocuri ```python sau ```matlab; Python: PEP 8, funcții mici, nume sugestive;
+         Matlab: vectorizare în loc de bucle unde se poate, ; la final ca să nu afișeze
+       - Proiect = aplicație completă: explică ARHITECTURA (module, date, interfață) nu doar sintaxa
+
+       A) PROIECT PYTHON (conform fișei):
+       - Fundamente: tipuri de date, operatori, structuri de control, funcții (ex. mini-calculator,
+         conversii de unități)
+       - Alegerea temei și a cerințelor (exemple: chatbot, aplicație de buget, organizator de rețete,
+         joc de memorie)
+       - Structura aplicației și backend: funcționalități de bază testate în linia de comandă
+       - Interfață grafică (tkinter sau similar) conectată la backend; introducere în OOP
+         (clase, moștenire)
+       - Persistența datelor (fișiere JSON/CSV, sqlite3), integrarea de API-uri externe (requests)
+       - Debugging, optimizare, pregătirea și prezentarea proiectului final
+
+       B) PROIECT MATLAB (conform fișei):
+       - Funcționalități de bază, tipuri de date și operații matriciale (.*, ./, ', operatorul :)
+       - Structuri decizionale și bucle; funcții definite de utilizator (fișiere .m, function)
+       - Grafice 2D și vizualizarea datelor (plot, subplot, xlabel, legend, grid)
+       - Fișiere și input/output (load, save, readtable, fprintf); stringuri și celule (cell arrays)
+       - Simulări numerice și optimizare (fminsearch, fzero), analiza semnalelor și prelucrarea
+         datelor (fft, filter), ecuații diferențiale (ode45)
+       - Modelare și simulare: aplicații practice; algoritm complex dezvoltat și testat
+       - Interfețe grafice (App Designer / uifigure)
+
+       CAPCANE FRECVENTE:
+       - Python: indentare, liste mutabile ca argument implicit, confuzia = / ==, copierea listelor
+       - Matlab: * (matriceal) vs .* (element cu element), indexare de la 1, dimensiuni incompatibile
+       - Proiect: funcționalitate fără tratarea erorilor de intrare; lipsa salvării datelor
+    """,
+    "modele spice": r"""
+    1. MODELE SPICE — ANUL II ETTI/UPB, Semestrul II (DISCIPLINĂ OPȚIONALĂ, curs 1h + laborator 1h):
+       (La INF se numește „Modele ale componentelor electronice pentru SPICE” — același conținut.)
+       Leagă fizica dispozitivelor (Dispozitive electronice) de simularea circuitelor (CEF).
+
+       CONVENȚII:
+       - Netlist-urile SPICE în blocuri ```spice: prima linie = titlu, componente (R1 n1 n2 1k),
+         surse (V1 in 0 DC 5 / AC 1 / SIN(...)), modele (.model DMOD D(IS=... N=...)), analize
+         (.op, .dc, .ac dec 10 1 1meg, .tran 1u 1m), .end
+       - Nodul 0 = masa; sufixe SPICE: f p n u m k meg g (ATENȚIE: m = mili, meg = mega)
+       - Simulator implicit: LTspice sau ngspice; precizează când sintaxa diferă
+
+       ══════════════════════════════════════════
+       TEMATICA (conform fișei disciplinei)
+       ══════════════════════════════════════════
+       - SPICE ca simulator de circuite; problematica modelării: modele, parametri de model,
+         extractoare de parametri, algoritmi de extracție
+       - DIODA în SPICE: declarare, apelarea bibliotecii cu parametri de model; regim static
+         (IS, N, RS, BV, IBV) și regim dinamic (CJO, VJ, M, TT); aplicații
+       - TRANZISTORUL BIPOLAR în SPICE: declarare (Q1 c b e QMOD); modelul de start Ebers-Moll
+         fundamental; rezistențe serie (RB, RC, RE); efectul Early (VAF); curenți de
+         generare-recombinare (ISE, NE); nivel mare de injecție (IKF); modelul Gummel-Poon ca extensie
+       - REGIMUL DINAMIC: capacități de tranziție (CJE, CJC, VJE, MJE...) și de difuzie (TF, TR);
+         extragerea parametrilor de model; circuitul echivalent complet al TB
+       - TRANZISTORUL MOS în SPICE: declarare (M1 d g s b MMOD L= W=), nivelele de model
+         (LEVEL 1 Shichman-Hodges: VTO, KP, LAMBDA, GAMMA, PHI), introducere BSIM
+
+       STRUCTURĂ LA EXERCIȚII:
+       **1.** Ce parametru/efect vrem să observăm → **2.** netlist → **3.** ce analiză și de ce →
+       **4.** ce ar trebui să arate graficul (formă, valori aproximative) → **5.** cum extragi
+       parametrul din rezultat (ex. IS și N din panta ln(I)–V)
+
+       CAPCANE FRECVENTE:
+       - „1M” interpretat ca 1 mili (nu mega); lipsa nodului 0; noduri flotante
+       - Confuzia capacități de tranziție (polarizare inversă) / de difuzie (polarizare directă)
+       - Parametri de model lăsați la valorile implicite fără să știi că există
+    """,
+    "tehnici cad pentru module electronice": r"""
+    1. TEHNICI CAD ÎN REALIZAREA MODULELOR ELECTRONICE — ANUL II ETTI/UPB, Semestrul II
+       (DISCIPLINĂ OPȚIONALĂ, curs 1h + laborator 1h). La INF: „Tehnologii de interconectare
+       în electronică” — conținut foarte apropiat (packaging + proiectare CAE-CAD-CAM).
+
+       ══════════════════════════════════════════
+       TEMATICA (conform fișelor disciplinelor)
+       ══════════════════════════════════════════
+       - Tehnologii avansate în industria electronică; fluxuri de concepție, proiectare și producție
+       - Packaging electronic: niveluri (cip → capsulă → placă → modul → sistem), tehnici și
+         tehnologii de interconectare (wire bonding, flip-chip, BGA, THT vs. SMT), evoluții și tendințe
+       - Sisteme EDA integrate CAE-CAD-CAM; proiecte simple vs. complexe (concatenate, ierarhice)
+       - Proiectare schematică (SCH): aspecte electrice și tehnologice, generarea structurilor
+         de interconectare, generarea componentelor virtuale
+       - Proiectare PCB „on-board”: procesări manuale, interactive și automate (autoplasare,
+         autorutare); generarea capsulelor (footprints) din datele producătorului; plăci multistrat,
+         via-uri (through, blind, buried), stack-up
+       - Componente electronice reale vs. virtuale; optimizarea și postprocesarea proiectelor CAD
+       - Interfațarea proiectare–fabricație–asamblare: DFM (Design for Manufacturing),
+         DFA, sisteme CAM, fișiere Gerber/ODB++, standarde globale (IPC: ex. IPC-2221 proiectare,
+         IPC-A-610 acceptabilitate)
+       - Management termic virtual și real: căi de disipare, via-uri termice, plan de cupru,
+         radiatoare, simulare termică; de ce contează la electronica modernă (densitate, fiabilitate)
+
+       STIL: explică întâi DE CE (constrângerea fizică sau de fabricație), apoi CUM se face în CAD.
+       Dă valori orientative (lățimi de traseu, distanțe) doar ca ordin de mărime și spune că
+       valorile exacte vin din regulile fabricantului PCB.
+
+       CAPCANE FRECVENTE:
+       - Footprint desenat după altă capsulă decât componenta comandată
+       - Autorutare fără reguli setate; ignorarea managementului termic la componente de putere
+       - Proiect care nu respectă regulile fabricantului (DFM) → plăci rebutate
+    """,
+    "programare orientată pe obiecte": r"""
+    1. PROGRAMARE OBIECT ORIENTATĂ (ELA/TST/RST/MON) / PROGRAMARE PE PLATFORMĂ ANDROID (INF)
+       — ANUL II ETTI/UPB, Semestrul II (DISCIPLINĂ OPȚIONALĂ, curs 1h + laborator 1h):
+       Aceeași tematică: Java + programare Android.
+
+       CONVENȚII:
+       - Cod în blocuri ```java (sau ```kotlin doar dacă studentul cere); layout-uri în ```xml
+       - Convenții Java: clase PascalCase, metode/variabile camelCase, constante UPPER_CASE;
+         câmpuri private + getteri/setteri unde are sens
+       - Pentru Android: menționează fișierul în care merge codul (MainActivity.java,
+         res/layout/activity_main.xml, AndroidManifest.xml)
+
+       ══════════════════════════════════════════
+       TEMATICA (conform fișei disciplinei)
+       ══════════════════════════════════════════
+       - ELEMENTELE LIMBAJULUI JAVA: tipuri primitive vs. referință, String, tablouri;
+         clase și obiecte, constructori, this, atribute și metode (operații), modificatori de acces,
+         static; moștenire (extends, super), suprascriere (@Override), polimorfism, clase abstracte
+         și interfețe; excepții (try/catch); colecții de bază (ArrayList, HashMap)
+       - BAZELE PROGRAMĂRII ANDROID: structura unui proiect (Android Studio, Gradle), Activity și
+         ciclul de viață (onCreate, onStart, onResume, onPause, onStop, onDestroy), resurse (res/),
+         manifest, Intent (pornirea altei activități, transmiterea datelor), permisiuni
+       - INTERFEȚE GRAFICE INTERACTIVE: layout-uri (LinearLayout, ConstraintLayout), View-uri
+         (TextView, EditText, Button, ImageView), findViewById / View Binding, evenimente
+         (setOnClickListener), liste (RecyclerView — idee generală), Toast, dialoguri
+
+       STRUCTURĂ LA EXERCIȚII: cerință → ce clase/componente sunt necesare → cod → explicație →
+       cum testezi (emulator / telefon, Logcat pentru erori)
+
+       CAPCANE FRECVENTE:
+       - Compararea String-urilor cu == în loc de equals()
+       - NullPointerException: findViewById înainte de setContentView, view inexistent în layout
+       - Operații lungi (rețea, fișiere mari) pe firul principal (UI thread) → aplicația îngheață
+       - Pierderea stării la rotirea ecranului (activitatea e recreată)
+    """,
 }
 
 
@@ -5343,6 +5672,7 @@ SUBJECT_KEYWORDS = {
         "sursă comună", "sursa comuna", "amplificator inversor", "amplificator neinversor",
         "transconductanță", "transconductanta", "model de semnal mic", "slew rate",
         "regulile de aur", "clasa a de amplificare", "amplificator integrator",
+        "stabilizator", "oscilator", "colpitts", "hartley", "punte wien", "barkhausen", "flyback",
     ],
     "circuite integrate digitale": [
         "poartă logică", "poarta logica", "tabel de adevăr", "tabel de adevar",
@@ -5381,6 +5711,141 @@ SUBJECT_KEYWORDS = {
         "forma normală", "forma normala", "tranzacție acid", "tranzactie acid",
         "atomicitate consistență izolare", "index bază de date", "index baza de date",
         "subinterogare", "denormalizare",
+    ],
+    "sisteme de operare": [
+        "linux",
+        "ubuntu",
+        "terminal linux",
+        "bash",
+        "chmod",
+        "chown",
+        "sudo",
+        "apt install",
+        "mașină virtuală",
+        "masina virtuala",
+        "virtualbox",
+        "sistem de operare",
+        "sistemul de operare",
+        "sistemele de operare",
+        "nucleul sistemului",
+        "permisiuni",
+        "sistem de fișiere",
+        "sistem de fisiere",
+        "script bash",
+        "grep ",
+        "systemd",
+        "partiționare",
+        "partitionare",
+        "git commit",
+        "ssh ",
+        "comenzi linux",
+        "linia de comandă",
+        "linia de comanda",
+    ],
+    "electronică digitală": [
+        "verilog",
+        "automat finit",
+        "automate finite",
+        "automat de stări",
+        "automat de stari",
+        "moore",
+        "mealy",
+        "toyprocessor",
+        "ralu",
+        "register file",
+        "master-slave",
+        "sisteme de ordinul",
+        "sistem de ordinul",
+        "codificarea stărilor",
+        "codificarea starilor",
+        "one-hot",
+        "data-latch",
+        "electronică digitală",
+        "electronica digitala",
+    ],
+    "grafică asistată de calculator": [
+        "inventor",
+        "autodesk",
+        "modelare 3d",
+        "design 3d",
+        "extrudare",
+        "sheet metal",
+        "desen de execuție",
+        "desen de executie",
+        "footprint",
+        "kicad",
+        "altium",
+        "orcad",
+        "gerber",
+        "imprimare 3d",
+        "pcb",
+        "grafică asistată",
+        "grafica asistata",
+    ],
+    "programare python și matlab": [
+        "python",
+        "matlab",
+        "tkinter",
+        "numpy",
+        "pandas",
+        "ode45",
+        "app designer",
+        "cell array",
+        "sqlite",
+        "proiect python",
+        "proiect matlab",
+        "plot(",
+    ],
+    "modele spice": [
+        "spice",
+        "ltspice",
+        "ngspice",
+        "pspice",
+        "netlist",
+        ".model",
+        "parametri de model",
+        "ebers-moll",
+        "gummel-poon",
+        "efectul early",
+        "capacitate de difuzie",
+        "capacitate de tranziție",
+        "capacitate de tranzitie",
+        "extragerea parametrilor",
+    ],
+    "tehnici cad pentru module electronice": [
+        "packaging",
+        "bga",
+        "smd",
+        "multistrat",
+        "dfm",
+        "design for manufacturing",
+        "ipc-",
+        "management termic",
+        "via termic",
+        "via-uri",
+        "stack-up",
+        "tehnologii de interconectare",
+        "module electronice",
+        "pcb",
+    ],
+    "programare orientată pe obiecte": [
+        "java",
+        "android",
+        "moștenire",
+        "mostenire",
+        "polimorfism",
+        "activity",
+        "intent",
+        "recyclerview",
+        "setonclicklistener",
+        "gradle",
+        "kotlin",
+        "orientată pe obiecte",
+        "orientata pe obiecte",
+        "obiect orientată",
+        "obiect orientata",
+        "clasă abstractă",
+        "clasa abstracta",
     ],
 }
 
@@ -5441,7 +5906,9 @@ _STRONG_INDICATORS = {
                      "saturația miezului", "saturatia miezului", "clasa dielectrică x7r"],
     "circuite electronice fundamentale": ["amplificator operațional", "amplificator operational",
                      "regulile de aur", "emitor comun", "colector comun", "bază comună",
-                     "baza comuna", "slew rate", "transconductanță", "transconductanta"],
+                     "baza comuna", "slew rate", "transconductanță", "transconductanta",
+                     "colpitts", "hartley", "punte wien", "barkhausen", "stabilizator de tensiune",
+                     "stabilizatorul", "oscilatorul", "în comutație flyback"],
     "circuite integrate digitale": ["hartă karnaugh", "harta karnaugh",
                      "legile lui de morgan", "sumator complet", "semi-sumator",
                      "circuit combinațional", "circuit combinational", "circuit secvențial",
@@ -5463,6 +5930,81 @@ _STRONG_INDICATORS = {
                      "forma normală", "forma normala", "tranzacție acid", "tranzactie acid",
                      "cheie primară", "cheie primara", "cheie externă", "cheie externa",
                      "inner join", "left join"],
+    "sisteme de operare": [
+        "chmod",
+        "chown",
+        "sudo",
+        "apt install",
+        "script bash",
+        "#!/bin/bash",
+        "systemd",
+        "mașină virtuală linux",
+        "masina virtuala linux",
+        "linia de comandă linux",
+        "linia de comanda linux",
+        "sistem de operare",
+    ],
+    "electronică digitală": [
+        "verilog",
+        "toyprocessor",
+        "automat finit",
+        "automat moore",
+        "automat mealy",
+        "ralu",
+        "register file",
+        "always @(posedge",
+    ],
+    "grafică asistată de calculator": [
+        "autodesk inventor",
+        "sheet metal",
+        "desen de execuție",
+        "desen de executie",
+        "modelare și design 3d",
+        "modelare si design 3d",
+        "kicad",
+        "fișiere gerber",
+        "fisiere gerber",
+    ],
+    "programare python și matlab": [
+        "tkinter",
+        "ode45",
+        "app designer",
+        "proiect python",
+        "proiect matlab",
+        "cell array",
+        "fișier .m",
+        "fisier .m",
+    ],
+    "modele spice": [
+        "modele spice",
+        "ltspice",
+        "ngspice",
+        "netlist",
+        "ebers-moll",
+        "gummel-poon",
+        "parametri de model spice",
+        ".model",
+    ],
+    "tehnici cad pentru module electronice": [
+        "packaging electronic",
+        "design for manufacturing",
+        "ipc-2221",
+        "ipc-a-610",
+        "management termic",
+        "tehnologii de interconectare",
+        "via termic",
+    ],
+    "programare orientată pe obiecte": [
+        "android studio",
+        "setonclicklistener",
+        "recyclerview",
+        "ciclul de viață al activității",
+        "ciclul de viata al activitatii",
+        "public class",
+        "extends activity",
+        "appcompatactivity",
+        "java",
+    ],
 }
 
 def detect_subject_from_text(text: str) -> str | None:
@@ -8150,6 +8692,94 @@ INTREBARI_POOL = {
         "Ce este o subinterogare (subquery) și când o folosesc?",
         "Care e diferența dintre 2NF și 3NF?",
         "De ce uneori se acceptă denormalizarea unei baze de date?",
+    ],
+    "sisteme de operare": [
+        "Cum instalez Ubuntu într-o mașină virtuală VirtualBox?",
+        "Ce înseamnă permisiunile rwxr-xr-x și cum le schimb cu chmod?",
+        "Care e diferența dintre o cale absolută și una relativă?",
+        "Cum scriu un script Bash care primește argumente?",
+        "Ce fac operatorii |, > și >> în terminal?",
+        "Care e diferența dintre un nucleu monolitic și un micronucleu?",
+        "Cum găsesc și opresc un proces care s-a blocat?",
+        "Ce sunt semnalele SIGTERM, SIGKILL și SIGINT?",
+        "Cum arhivez și comprim un director cu tar?",
+        "Care e diferența dintre o legătură hard și una simbolică?",
+        "Cum funcționează pornirea unui sistem Linux, de la BIOS la login?",
+        "Cum folosesc git pentru a salva versiunile proiectului meu?",
+    ],
+    "electronică digitală": [
+        "Ce înseamnă clasificarea sistemelor digitale după numărul de bucle?",
+        "Cum descriu un multiplexor 4:1 în Verilog?",
+        "Care e diferența dintre un automat Moore și unul Mealy?",
+        "Cum proiectez un automat finit care detectează secvența 101?",
+        "Cum funcționează principiul Master-Slave la un bistabil?",
+        "Care e diferența dintre un latch și un flip-flop?",
+        "De ce folosesc <= și nu = într-un always @(posedge clk)?",
+        "Cum construiesc un numărător sincron pe 4 biți?",
+        "Ce face un register file și cum e folosit într-un procesor?",
+        "Cum funcționează toyProcessor (RALU + PC)?",
+        "Care e diferența dintre codificarea binară și one-hot a stărilor?",
+        "Cum implementez o ALU simplă cu adunare, scădere și operații logice?",
+    ],
+    "grafică asistată de calculator": [
+        "Care sunt etapele de la schemă la placa PCB gata de fabricat?",
+        "Cum creez un footprint nou după foaia de catalog a componentei?",
+        "Ce sunt constrângerile geometrice și dimensionale într-o schiță Inventor?",
+        "Cum fac o piesă din tablă îndoită cu Sheet Metal?",
+        "Cum constrâng piesele într-un ansamblu Inventor?",
+        "Ce fișiere trimit unui fabricant de PCB?",
+        "De ce se pune un condensator de decuplare lângă circuitul integrat?",
+        "Cum aleg lățimea unui traseu pe PCB în funcție de curent?",
+        "Ce verifică DRC și ERC?",
+        "Cum realizez un desen de execuție cu cote și secțiuni?",
+    ],
+    "programare python și matlab": [
+        "Cum structurez un proiect Python cu interfață grafică în tkinter?",
+        "Cum salvez datele aplicației mele Python într-un fișier JSON?",
+        "Cum folosesc o clasă în Python pentru proiectul meu?",
+        "Cum apelez un API extern din Python?",
+        "Care e diferența dintre * și .* în Matlab?",
+        "Cum fac un grafic cu mai multe curbe și legendă în Matlab?",
+        "Cum rezolv o ecuație diferențială cu ode45?",
+        "Cum calculez și afișez spectrul unui semnal cu fft în Matlab?",
+        "Cum creez o interfață grafică simplă în App Designer?",
+        "Ce temă de proiect Python aș putea alege și cum o împart în etape?",
+    ],
+    "modele spice": [
+        "Cum scriu un netlist SPICE pentru un divizor de tensiune?",
+        "Ce parametri are modelul SPICE al unei diode și ce înseamnă?",
+        "Cum extrag IS și N ale unei diode din caracteristica I-V?",
+        "Ce este modelul Ebers-Moll al tranzistorului bipolar?",
+        "Cum modelează SPICE efectul Early?",
+        "Care e diferența dintre capacitatea de tranziție și cea de difuzie?",
+        "Ce analiză SPICE folosesc pentru răspunsul în frecvență?",
+        "Cum declar un tranzistor MOS în SPICE și ce înseamnă VTO și KP?",
+        "De ce în SPICE 1M înseamnă 1 mili și nu 1 mega?",
+        "Cum simulez caracteristica de ieșire a unui tranzistor bipolar?",
+    ],
+    "tehnici cad pentru module electronice": [
+        "Ce înseamnă packaging electronic și care sunt nivelurile lui?",
+        "Care e diferența dintre tehnologia THT și SMT?",
+        "Ce înseamnă DFM și de ce contează la proiectarea unui PCB?",
+        "Cum proiectez o placă multistrat și ce e stack-up-ul?",
+        "Ce sunt via-urile blind și buried?",
+        "Cum fac managementul termic al unei componente de putere pe PCB?",
+        "Ce sunt standardele IPC și care sunt cele mai importante?",
+        "Care e diferența dintre o componentă reală și una virtuală în CAD?",
+        "Când folosesc autorutarea și când rutez manual?",
+        "Ce este o capsulă BGA și ce probleme ridică la asamblare?",
+    ],
+    "programare orientată pe obiecte": [
+        "Care e diferența dintre o clasă și un obiect în Java?",
+        "Cum funcționează moștenirea și polimorfismul în Java?",
+        "Care e diferența dintre o clasă abstractă și o interfață?",
+        "De ce compar String-urile cu equals() și nu cu ==?",
+        "Care sunt etapele ciclului de viață al unei Activity în Android?",
+        "Cum trec de la o activitate la alta cu un Intent?",
+        "Cum tratez apăsarea unui buton în Android?",
+        "Cum construiesc un layout cu ConstraintLayout?",
+        "De ce se blochează aplicația dacă fac o cerere de rețea pe firul principal?",
+        "Cum afișez o listă de elemente cu RecyclerView?",
     ],
 }
 

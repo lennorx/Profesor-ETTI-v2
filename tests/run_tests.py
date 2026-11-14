@@ -31,6 +31,7 @@ SUITE = {
     "rot_test":    (True,  [], ""),
     "retry_test":  (True,  [], ""),
     "keys_test":   (False, [], ""),
+    "subjects_test": (True, [], ""),
     "photo_test":  (False, ["nokey"], ""),
     "photo_test:ocr": (False, ["ocr"], 'OCR_API_KEY = "AIzaOCRKEY000000000000000"\n'),
 }

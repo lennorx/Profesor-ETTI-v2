@@ -19,6 +19,7 @@ APP_FILE=profesor_etti_specializari.py python3 tests/run_tests.py   # alt fișie
 | `rot_test` | rotația chei × modele: cotă pe zi / pe minut, model inexistent (404), saltul direct peste combinațiile epuizate, `thinking_budget` pentru Gemini 2.5 |
 | `retry_test` | butonul „🔄 Reîncercați răspunsul” chiar refă cererea |
 | `keys_test` | chei API în cont: criptare, etichete, cheie invalidă/duplicat respinse, trecerea Mama → Tata la epuizare, alt dispozitiv, ștergere |
+| `subjects_test` | toate materiile au prompt / cuvinte cheie / indicatori / întrebări; butoanele materiilor noi; promptul corect ajunge la AI; detecția automată (materii noi + regresii) |
 | `photo_test` | cheia citită din poză: fără nicio cheie (mesaj), cu `OCR_API_KEY`, cheie ruptă pe 2 rânduri |
 
 Pentru altă aplicație de profesor virtual: copiază folderul `tests/`, rulează cu `APP_FILE=...` și
