@@ -83,7 +83,10 @@
     beat();
     var n = openCount();
     if (n >= maxTabs) { showLimit(true, n); return; }
-    var p = window.parent.location;
+    // Pe Streamlit Cloud aplicația rulează într-un iframe (/~/+/): linkul se face spre pagina de sus,
+    // care transmite parametrii aplicației. Local / pe alt server: pagina-părinte.
+    var p;
+    try { p = window.top.location; void p.pathname; } catch (e) { p = window.parent.location; }
     var url = p.origin + p.pathname + "?new=1&opt=" + encodeURIComponent(opt);
     window.open(url, "_blank", "noopener");
   });
