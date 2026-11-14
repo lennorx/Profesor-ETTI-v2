@@ -77,3 +77,7 @@ create index if not exists idx_etti_api_keys_user_id on public.etti_api_keys(use
 alter table public.etti_api_keys enable row level security;
 revoke all on public.etti_api_keys from anon, authenticated;
 -- ROLLBACK: drop table public.etti_api_keys;
+
+-- ── Materia confirmată a conversației (mod Automat: studentul confirmă o dată, apoi rămâne) ──
+alter table public.sessions add column if not exists materie text;
+-- ROLLBACK: alter table public.sessions drop column materie;

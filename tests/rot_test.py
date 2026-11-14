@@ -24,7 +24,7 @@ K1,K2="AIzaFAKE1111111111111111","AIzaFAKE2222222222222222"
 DAY="429 RESOURCE_EXHAUSTED. Quota exceeded for metric: generate_content_free_tier_requests, limit: 500, quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier"
 MIN="429 RESOURCE_EXHAUSTED. quotaId: GenerateRequestsPerMinutePerProjectPerModel-FreeTier. Please retry in 36.2s"
 at=AppTest.from_file("app_under_test.py", default_timeout=90); at.session_state["_browser_storage"]={}; at.query_params["sid"]="f"*64
-at.session_state["key_index"]=0; at.run()
+at.session_state["key_index"]=0; at.session_state["materie_selectata"]="bazele electrotehnicii"; at.run()
 def ask(q):
     n=len(CALLS); at.chat_input[0].set_value(q).run(); assert not at.exception,[e.value for e in at.exception]
     return CALLS[n:]

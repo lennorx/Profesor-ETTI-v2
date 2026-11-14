@@ -21,6 +21,7 @@ from streamlit.testing.v1 import AppTest
 ok = lambda c, m: print(("PASS " if c else "FAIL ") + m)
 at = AppTest.from_file("app_under_test.py", default_timeout=90)
 at.query_params["sid"] = "b" * 64; at.session_state["_browser_storage"] = {}
+at.session_state["materie_selectata"] = "bazele electrotehnicii"   # mod manual: fără confirmarea materiei
 at.run()
 at.chat_input[0].set_value("Explică legea lui Ohm la rezistoare").run()
 ok(any(b.key == "_retry_after_key_error" for b in at.button), "după eroarea de cotă apare butonul „Reîncercați”")

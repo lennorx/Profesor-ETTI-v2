@@ -24,7 +24,7 @@ from streamlit.testing.v1 import AppTest
 DB=fake_sb.DB
 ok=lambda c,m: print(("PASS " if c else "FAIL ")+m)
 def app(storage):
-    at=AppTest.from_file("app_under_test.py", default_timeout=90); at.session_state["_browser_storage"]=storage; at.run()
+    at=AppTest.from_file("app_under_test.py", default_timeout=90); at.session_state["_browser_storage"]=storage; at.session_state["materie_selectata"]="bazele electrotehnicii"; at.run()
     assert not at.exception,[e.value for e in at.exception]; return at
 def btn(at,l): return next(b for b in at.button if b.label==l)
 a=app({"sid":"7"*64,"known":[],"token":""})

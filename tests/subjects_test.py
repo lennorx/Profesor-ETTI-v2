@@ -72,3 +72,40 @@ CASES = [
 ]
 bad = [(q, e, detect(q)) for q, e in CASES if detect(q) != e]
 ok(not bad, f"detecția automată recunoaște corect {len(CASES) - len(bad)}/{len(CASES)} întrebări {bad}")
+
+# ── Mod „🤖 Automat”: confirmarea materiei detectate (o dată pe conversație) ──
+SEEN.clear()
+b = AppTest.from_file("app_under_test.py", default_timeout=90)
+b.query_params["sid"] = "e" * 64; b.session_state["_browser_storage"] = {}
+b.run()
+b.chat_input[0].set_value("Explică modelul Ebers-Moll și efectul Early în SPICE").run()
+assert not b.exception, [e.value for e in b.exception]
+ok(not SEEN and any(x.key == "_confirm_detected_subject" for x in b.button),
+   "Automat: întâi cere confirmarea materiei detectate, nu răspunde direct")
+ok(any("Modele SPICE" in x.label for x in b.button if x.key == "_confirm_detected_subject"),
+   "butonul de confirmare propune materia detectată (Modele SPICE)")
+b.button(key="_confirm_detected_subject").click().run()
+assert not b.exception, [e.value for e in b.exception]
+ok(SEEN and "MODELE SPICE" in SEEN[-1], "după confirmare, întrebarea pleacă la AI cu promptul materiei")
+ok(sum(1 for m in b.session_state["messages"] if m["role"] == "user") == 1, "mesajul studentului apare o singură dată")
+row = next(r for r in fake_sb.DB["sessions"] if r["session_id"] == "e" * 64)
+ok(row.get("materie") == "modele spice", "materia confirmată e salvată în conversație (sessions.materie)")
+n = len(SEEN)
+b.chat_input[0].set_value("Și cum declar un tranzistor MOS cu Java?").run()
+ok(len(SEEN) == n + 1 and "MODELE SPICE" in SEEN[-1] and not any(x.key == "_confirm_detected_subject" for x in b.button),
+   "al doilea mesaj: fără confirmare, rămâne pe materia confirmată")
+# redeschiderea conversației (alt dispozitiv / reload): materia vine din DB, fără confirmare
+c = AppTest.from_file("app_under_test.py", default_timeout=90)
+c.query_params["sid"] = "e" * 64; c.session_state["_browser_storage"] = {}
+c.run()
+n = len(SEEN)
+c.chat_input[0].set_value("Încă o întrebare despre capacități de difuzie").run()
+ok(len(SEEN) == n + 1 and "MODELE SPICE" in SEEN[-1], "conversația redeschisă își păstrează materia, fără confirmare")
+# „Nu — aleg altă materie”
+d = AppTest.from_file("app_under_test.py", default_timeout=90)
+d.query_params["sid"] = "f" * 64; d.session_state["_browser_storage"] = {}
+d.run()
+d.chat_input[0].set_value("Cum folosesc un pointer în C și ce face #include?").run()
+d.button(key="_pick_materie_structuri de date și algoritmi").click().run()
+assert not d.exception, [e.value for e in d.exception]
+ok(SEEN and "STRUCTURI DE DATE" in SEEN[-1].upper(), "„Altă materie” trimite întrebarea cu materia aleasă de student")

@@ -1129,6 +1129,27 @@ def _session_owner(session_id: str) -> tuple[bool, str | None]:
         return False, None
 
 
+def save_session_subject(session_id: str, materie: str | None):
+    """Ține minte materia confirmată a conversației (coloana sessions.materie), ca la redeschidere
+    pe orice dispozitiv să nu mai fie nevoie de confirmare."""
+    if not materie or not is_valid_session_id(session_id):
+        return
+    try:
+        get_supabase_client().table("sessions").update({"materie": materie}) \
+            .eq("session_id", session_id).execute()
+    except Exception as e:
+        _log("Materia conversației nu a putut fi salvată", "silent", e)
+
+
+def load_session_subject(session_id: str) -> str | None:
+    try:
+        r = get_supabase_client().table("sessions").select("materie") \
+            .eq("session_id", session_id).limit(1).execute()
+        return (r.data[0].get("materie") if r.data else None) or None
+    except Exception:
+        return None
+
+
 def session_exists_in_db(session_id: str) -> bool:
     """Verifică dacă un session_id există deja în Supabase."""
     return _session_owner(session_id)[0]
@@ -7302,7 +7323,7 @@ with st.sidebar:
                        "hw_corectare", "hw_done", "hw_from_photo", "hw_ocr_done",
                        "quiz_mode", "quiz_active", "quiz_questions", "quiz_correct",
                        "quiz_answers", "quiz_submitted", "quiz_materie", "quiz_nivel",
-                       "_suggested_question", "_pending_user_msg"]:
+                       "_suggested_question", "_pending_user_msg", "_pending_suggested_subject"]:
                 st.session_state.pop(_k, None)
             st.session_state["pedagogie_mode"]    = True
             st.session_state["_detected_subject"] = "pedagogie"
@@ -7417,7 +7438,7 @@ with st.sidebar:
                        "hw_corectare", "hw_done", "hw_from_photo", "hw_ocr_done",
                        "quiz_mode", "quiz_active", "quiz_questions", "quiz_correct",
                        "quiz_answers", "quiz_submitted", "quiz_materie", "quiz_nivel",
-                       "_suggested_question", "_pending_user_msg"]:
+                       "_suggested_question", "_pending_user_msg", "_pending_suggested_subject"]:
                 st.session_state.pop(_k, None)
             st.session_state["orientare_mode"]    = True
             st.session_state["_detected_subject"] = "orientare_specializare"
@@ -7873,7 +7894,7 @@ with st.sidebar:
         "quiz_mode", "quiz_active", "quiz_questions", "quiz_correct",
         "quiz_answers", "quiz_submitted", "quiz_materie", "quiz_nivel",
     ]
-    _SHARED_KEYS = ["_suggested_question", "_pending_user_msg"]
+    _SHARED_KEYS = ["_suggested_question", "_pending_user_msg", "_pending_suggested_subject"]
 
     def _clear_all_modes():
         for k in _HW_KEYS + _QUIZ_KEYS + _SHARED_KEYS:
@@ -8100,9 +8121,14 @@ if (
     # detectăm materia din primele mesaje ale studentului și o blocăm.
     # Asta previne re-detectarea la mijlocul conversației după un reload.
     if _loaded_msgs and not st.session_state.get("_detected_subject"):
-        # Căutăm primele 3 mesaje ale studentului pentru o detecție mai sigură
+        # 1) materia confirmată de student și salvată în DB (sessions.materie)
+        _saved_subject = load_session_subject(st.session_state.session_id)
+        if _saved_subject and _saved_subject in _MATERII_LABEL:
+            st.session_state["_detected_subject"] = _saved_subject
+            update_system_prompt_for_subject(_saved_subject)
+        # 2) altfel (conversații vechi): detectăm din primele 3 mesaje ale studentului
         _first_user_msgs = [m["content"] for m in _loaded_msgs if m.get("role") == "user"][:3]
-        _combined_text = " ".join(_first_user_msgs)
+        _combined_text = " ".join(_first_user_msgs) if not st.session_state.get("_detected_subject") else ""
         if _combined_text:
             _restored_subject = detect_subject_from_text(_combined_text)
             if _restored_subject:
@@ -8309,28 +8335,59 @@ if st.session_state.get("_quick_action"):
                         _show_ai_error(e, "acțiune rapidă")
     st.stop()
 
-# ── Handler mesaj în așteptare — materie nedetectată în mod Automat ──
+def _ask_subject_confirmation(user_input: str, detected: str | None):
+    """Mod Automat, primul mesaj al conversației: mesajul așteaptă până când studentul confirmă
+    materia sugerată (sau alege alta). Mesajul e deja afișat, salvat și taxat."""
+    st.session_state["_pending_user_msg"] = user_input
+    if detected:
+        st.session_state["_pending_suggested_subject"] = detected
+    else:
+        st.session_state.pop("_pending_suggested_subject", None)
+    st.rerun()
+
+
+# ── Handler mesaj în așteptare — mod Automat: confirmarea / alegerea materiei ──
 if st.session_state.get("_pending_user_msg") and st.session_state.get("materie_selectata") is None:
     _pending_msg = st.session_state["_pending_user_msg"]
 
-    with st.chat_message("assistant"):
-        st.markdown("**La ce materie se referă întrebarea ta?** Alege una din opțiunile de mai jos:")
-        # Butoane pentru fiecare materie (fără Automat)
-        _materii_optiuni = [(k, v) for k, v in MATERII.items() if v is not None]
+    _sugg = st.session_state.get("_pending_suggested_subject")
+    _sugg = _sugg if _sugg in _MATERII_LABEL else None
+
+    def _confirm_subject(cod: str):
+        # Setăm materia și trimitem mesajul original
+        update_system_prompt_for_subject(cod)
+        st.session_state["_detected_subject"] = cod
+        save_session_subject(st.session_state.session_id, cod)
+        st.session_state.pop("_pending_user_msg", None)
+        st.session_state.pop("_pending_suggested_subject", None)
+        st.session_state["_suggested_question"] = _pending_msg
+        # Mesajul e DEJA afișat, salvat și taxat (la chat_input) — legăm flag-urile de text,
+        # ca un flag rămas din greșeală să nu afecteze o altă întrebare.
+        st.session_state["_rl_prepaid"] = _pending_msg
+        st.session_state["_sq_already_saved"] = _pending_msg
+        st.rerun()
+
+    def _subject_grid(prefix: str):
+        _materii_optiuni = [(k, v) for k, v in MATERII.items() if v is not None and v != _sugg]
         _cols = st.columns(3)
         for i, (label, cod) in enumerate(_materii_optiuni):
             with _cols[i % 3]:
-                if st.button(label, key=f"_pick_materie_{cod}", use_container_width=True):
-                    # Setăm materia și trimitem mesajul original
-                    update_system_prompt_for_subject(cod)
-                    st.session_state["_detected_subject"] = cod
-                    st.session_state.pop("_pending_user_msg", None)
-                    st.session_state["_suggested_question"] = _pending_msg
-                    # Mesajul e DEJA afișat, salvat și taxat (la chat_input) — legăm flag-urile de text,
-                    # ca un flag rămas din greșeală să nu afecteze o altă întrebare.
-                    st.session_state["_rl_prepaid"] = _pending_msg
-                    st.session_state["_sq_already_saved"] = _pending_msg
-                    st.rerun()
+                if st.button(label, key=f"{prefix}{cod}", use_container_width=True):
+                    _confirm_subject(cod)
+
+    with st.chat_message("assistant"):
+        if _sugg:
+            _sugg_label = _MATERII_LABEL.get(_sugg, _sugg)
+            st.markdown(f"📚 Întrebarea pare să fie la **{_sugg_label}**. Corect?")
+            st.caption("Confirmi o singură dată: toată conversația rămâne apoi pe această materie.")
+            if st.button(f"✅ Da, {_sugg_label}", key="_confirm_detected_subject", type="primary",
+                         use_container_width=True):
+                _confirm_subject(_sugg)
+            with st.expander("Nu — aleg altă materie", expanded=False):
+                _subject_grid("_pick_materie_")
+        else:
+            st.markdown("**La ce materie se referă întrebarea ta?** Alege una din opțiunile de mai jos:")
+            _subject_grid("_pick_materie_")
 
     st.stop()
 
@@ -8355,15 +8412,13 @@ if st.session_state.get("_suggested_question"):
         if st.session_state.get("_detected_subject") != _materie_manuala:
             update_system_prompt_for_subject(_materie_manuala)
     else:
-        _detected = detect_subject_from_text(user_input)
         _prev_detected = st.session_state.get("_detected_subject")
-        if _detected and _detected != _prev_detected:
-            update_system_prompt_for_subject(_detected)
-            _det_label = _MATERII_LABEL.get(_detected, _detected.capitalize())
-            st.toast(f"📚 {_det_label}", icon="🎯")
-        elif not _detected and not _prev_detected:
-            st.session_state["_pending_user_msg"] = user_input
-            st.rerun()
+        if _prev_detected:
+            # Materia conversației e deja confirmată — o păstrăm (nu schimbăm contextul pe parcurs)
+            if st.session_state.get("system_prompt") is None:
+                update_system_prompt_for_subject(_prev_detected)
+        else:
+            _ask_subject_confirmation(user_input, detect_subject_from_text(user_input))
 
     # Mesajul curent al elevului e deja în st.session_state.messages (salvat înainte de apel),
     # dar îl trimitem separat în payload — îl scoatem din istoric ca să nu ajungă de 2 ori la model.
@@ -9002,17 +9057,12 @@ if user_input := st.chat_input("Întreabă profesorul..."):
             # Chat nou sau fără materie stabilită — rulăm detecția
             _detected = detect_subject_from_text(user_input)
 
-            if _detected:
-                # Detectat cu succes — blocăm materia pentru această conversație
-                update_system_prompt_for_subject(_detected)
-                _det_label = _MATERII_LABEL.get(_detected, _detected.capitalize())
-                st.toast(f"📚 {_det_label}", icon="🎯")
-                for _k in [k for k in st.session_state.keys() if k.startswith("_mismatch_warned_")]:
-                    del st.session_state[_k]
-            else:
-                # Nu s-a putut detecta materia — salvăm mesajul și întrebăm studentul
-                st.session_state["_pending_user_msg"] = user_input
-                st.rerun()
+            # Detectată sau nu, NU blocăm materia fără acordul studentului: o detecție greșită
+            # ar ține toată conversația pe instrucțiunile altei materii. Cerem confirmarea
+            # (un click, o singură dată pe conversație); dacă nu am detectat nimic, îl lăsăm să aleagă.
+            for _k in [k for k in st.session_state.keys() if k.startswith("_mismatch_warned_")]:
+                del st.session_state[_k]
+            _ask_subject_confirmation(user_input, _detected)
 
     # Mesajul curent al elevului e deja în st.session_state.messages (salvat înainte de apel),
     # dar îl trimitem separat în payload — îl scoatem din istoric ca să nu ajungă de 2 ori la model.

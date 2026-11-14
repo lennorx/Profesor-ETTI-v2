@@ -23,7 +23,7 @@ class C:
 genai.Client=C
 from streamlit.testing.v1 import AppTest
 ok=lambda c,m: print(("PASS " if c else "FAIL ")+m)
-at=AppTest.from_file("app_under_test.py", default_timeout=90); at.session_state["_browser_storage"]={}; at.query_params["sid"]="d"*64; at.run()
+at=AppTest.from_file("app_under_test.py", default_timeout=90); at.session_state["_browser_storage"]={}; at.query_params["sid"]="d"*64; at.session_state["materie_selectata"]="bazele electrotehnicii"; at.run()
 fu=at.file_uploader(key="_main_file_uploader")
 ok(fu.accept_multiple_files, "uploader acceptă mai multe fișiere")
 from PIL import Image as _I; import io as _io; _b=_io.BytesIO(); _I.new("RGB",(4,4),"red").save(_b,"PNG"); PNG=_b.getvalue()
