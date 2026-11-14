@@ -36,6 +36,7 @@ class Q:
     def neq(self, c, v): self.filters.append(lambda r: r.get(c) != v); return self
     def lt(self, c, v): self.filters.append(lambda r: r.get(c) is not None and r.get(c) < v); return self
     def gt(self, c, v): self.filters.append(lambda r: r.get(c) is not None and r.get(c) > v); return self
+    def gte(self, c, v): self.filters.append(lambda r: r.get(c) is not None and r.get(c) >= v); return self
     def in_(self, c, vs): vs = list(vs); self.filters.append(lambda r: r.get(c) in vs); return self
     def is_(self, c, v): self.filters.append(lambda r: r.get(c) is None); return self
     def order(self, c, desc=False): self._order = (c, desc); return self

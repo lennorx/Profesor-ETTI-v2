@@ -81,3 +81,7 @@ revoke all on public.etti_api_keys from anon, authenticated;
 -- ── Materia confirmată a conversației (mod Automat: studentul confirmă o dată, apoi rămâne) ──
 alter table public.sessions add column if not exists materie text;
 -- ROLLBACK: alter table public.sessions drop column materie;
+
+-- 14 nov. 2026: opțiunile conversației (materie selectată, Pas cu Pas, Strategie, Avansat, Examen,
+-- Engleză, Gândire extinsă, Sfaturi/Orientare) — reselectate la redeschidere, pe orice tab/dispozitiv.
+alter table public.sessions add column if not exists setari jsonb;

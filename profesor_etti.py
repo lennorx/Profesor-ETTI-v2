@@ -34,6 +34,14 @@ _session_bridge = (
     if (_SESSION_BRIDGE_DIR / "index.html").exists() else None
 )
 
+# Butonul „Conversație nouă” care deschide un TAB nou (maxim MAX_TABS), cu opțiunile tabului curent.
+_NEWTAB_BRIDGE_DIR = pathlib.Path(__file__).resolve().parent / "newtab_bridge"
+_newtab_bridge = (
+    components.declare_component("profesor_newtab_bridge", path=str(_NEWTAB_BRIDGE_DIR))
+    if (_NEWTAB_BRIDGE_DIR / "index.html").exists() else None
+)
+MAX_TABS = 5
+
 # === IMPORTURI PENTRU TIPURI NOI DE FIȘIERE ===
 # python-docx pentru .docx/.doc
 try:
@@ -288,6 +296,12 @@ def switch_session(new_session_id: str):
     _cleanup_gfiles()  # curățăm fișierele Google la switch sesiune
     st.session_state.session_id = new_session_id
     st.session_state.messages = []
+    # ?sid= din URL are prioritate la rularea următoare: dacă rămânea cel vechi, click-ul pe o conversație
+    # din listă redeschidea tot conversația curentă.
+    try:
+        st.query_params["sid"] = new_session_id
+    except Exception:
+        pass
     invalidate_session_cache()  # FIX: forțează refresh la switch
     # Curățăm contextul sesiunii vechi — nu trebuie injectat în cea nouă
     st.session_state.pop("_conversation_summary", None)
@@ -303,6 +317,12 @@ def switch_session(new_session_id: str):
     # de vechea sesiune (ex: la "Conversație nouă", ecranul de selecție a materiei
     # nu mai apărea dacă exista deja o materie selectată manual înainte).
     st.session_state.pop("materie_selectata", None)
+    # Sfaturi de studiu / Orientare țin de conversația din care plecăm; dacă noua conversație le avea,
+    # restore_session_setari() le repornește din sessions.setari.
+    st.session_state["pedagogie_mode"] = False
+    st.session_state["orientare_mode"] = False
+    st.session_state.pop("_editing_last_msg", None)
+    st.session_state.pop("_edit_text", None)
     # Curățăm toate cheile _mismatch_warned_* (una per sesiune anterioară)
     for _k in [k for k in st.session_state.keys() if k.startswith("_mismatch_warned_")]:
         del st.session_state[_k]
@@ -870,6 +890,58 @@ def _build_attachment_payload(media_content, text_file_content) -> list:
     return final_payload
 
 
+
+def _iter_interruptible(gen):
+    """Consumă un generator de răspuns AI într-un fir separat, ca butonul „Stop” și un mesaj nou să
+    funcționeze imediat.
+
+    Problema: cât timp firul scriptului aștepta primul fragment de la Gemini (cerere HTTP blocantă),
+    Streamlit nu putea opri rularea. Butonul Stop lăsa „Domnul Profesor scrie...” pe ecran, iar un mesaj
+    nou pornea o A DOUA rulare în paralel cu cea veche (două „scrie...”, niciun răspuns, refresh necesar).
+    Acum firul scriptului doar așteaptă fragmente într-o coadă și, la fiecare 0,3 s, trimite un mesaj gol
+    spre browser — punct în care Streamlit verifică Stop/rerun și oprește rularea curat."""
+    import queue as _queue
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+    q = _queue.Queue()
+    cancel = threading.Event()
+
+    def _worker():
+        try:
+            for piece in gen:
+                if cancel.is_set():
+                    break
+                q.put(("data", piece))
+            q.put(("done", None))
+        except BaseException as e:   # noqa: BLE001 — retransmisă în firul scriptului
+            q.put(("err", e))
+        finally:
+            try:
+                gen.close()
+            except Exception:
+                pass
+
+    ctx = get_script_run_ctx()
+    t = threading.Thread(target=_worker, daemon=True)
+    if ctx is not None:
+        add_script_run_ctx(t, ctx)   # generatorul folosește st.session_state / st.toast
+    tick = st.empty()                # „ceasul” care permite oprirea
+    t.start()
+    try:
+        while True:
+            try:
+                kind, val = q.get(timeout=0.3)
+            except _queue.Empty:
+                tick.empty()         # punct de control: aici Streamlit aplică Stop / mesaj nou
+                continue
+            if kind == "data":
+                yield val
+            elif kind == "done":
+                return
+            else:
+                raise val
+    finally:
+        cancel.set()
+
 def _stream_preview(text: str) -> str:
     """Textul afișat cât timp răspunsul se generează.
 
@@ -1148,6 +1220,81 @@ def load_session_subject(session_id: str) -> str | None:
         return (r.data[0].get("materie") if r.data else None) or None
     except Exception:
         return None
+
+
+# ── Opțiunile conversației (sessions.setari) ──
+# Fiecare conversație își ține minte opțiunile cu care a fost purtată: materia aleasă, Pas cu Pas,
+# Strategie, Avansat, Examen, Engleză, Gândire extinsă, Sfaturi de studiu / Orientare. La redeschidere
+# (din listă, după refresh, din alt tab sau alt dispozitiv) se reselectează automat.
+_SETARI_BOOL_KEYS = ("pas_cu_pas", "mod_strategie", "mod_avansat", "mod_bac_intensiv",
+                     "mod_engleza", "mod_gandire_extinsa", "pedagogie_mode", "orientare_mode")
+
+
+def _current_setari() -> dict:
+    d = {k: bool(st.session_state.get(k, False)) for k in _SETARI_BOOL_KEYS}
+    d["materie_selectata"] = st.session_state.get("materie_selectata")
+    return d
+
+
+def _apply_setari(setari: dict):
+    for k in _SETARI_BOOL_KEYS:
+        st.session_state[k] = bool(setari.get(k, False))
+    _mat = setari.get("materie_selectata")
+    if _mat is not None and _mat not in MATERII.values():
+        _mat = None
+    st.session_state["materie_selectata"] = _mat
+    if _mat:
+        st.session_state["_detected_subject"] = _mat
+    elif setari.get("pedagogie_mode"):
+        st.session_state["_detected_subject"] = "pedagogie"
+    elif setari.get("orientare_mode"):
+        st.session_state["_detected_subject"] = "orientare_specializare"
+    update_system_prompt_for_subject(st.session_state.get("_detected_subject"))   # promptul cu opțiunile restaurate
+
+
+def load_session_setari(session_id: str) -> dict | None:
+    try:
+        r = get_supabase_client().table("sessions").select("setari") \
+            .eq("session_id", session_id).limit(1).execute()
+        val = r.data[0].get("setari") if r.data else None
+        return val if isinstance(val, dict) else None
+    except Exception:
+        return None
+
+
+def save_session_setari(session_id: str, setari: dict):
+    if not is_valid_session_id(session_id) or not is_supabase_available():
+        return
+    try:
+        get_supabase_client().table("sessions").update({"setari": setari}) \
+            .eq("session_id", session_id).execute()
+    except Exception as e:
+        _log("Opțiunile conversației nu au putut fi salvate", "silent", e)
+
+
+def restore_session_setari(session_id: str):
+    """O dată per conversație deschisă: reselectează opțiunile salvate (dacă există)."""
+    if st.session_state.get("_setari_for_sid") == session_id:
+        return
+    st.session_state["_setari_for_sid"] = session_id
+    saved = load_session_setari(session_id) if is_supabase_available() else None
+    from_db = bool(saved)
+    if not saved:
+        # tab nou deschis cu „Conversație nouă”: pornește cu opțiunile tabului din care a fost deschis
+        saved = st.session_state.pop("_pending_new_tab_opt", None)
+    if saved:
+        _apply_setari(saved)
+    st.session_state["_setari_saved"] = _current_setari() if from_db else None
+
+
+def persist_session_setari():
+    """Salvează opțiunile conversației curente doar când se schimbă (un UPDATE, nu la fiecare rerun)."""
+    sid = st.session_state.get("session_id", "")
+    cur = _current_setari()
+    if st.session_state.get("_setari_for_sid") != sid or st.session_state.get("_setari_saved") == cur:
+        return
+    save_session_setari(sid, cur)
+    st.session_state["_setari_saved"] = cur
 
 
 def session_exists_in_db(session_id: str) -> bool:
@@ -1902,6 +2049,7 @@ def inject_session_js():
         // Sincronizare idempotentă — SID-ul curent e deja cel confirmat
         if (pythonSid && pythonSid.length >= 16) {{
             localStorage.setItem(SID_KEY, pythonSid);
+            try {{ sessionStorage.setItem('profesor_tab_sid', pythonSid); }} catch (e) {{}}
 
             // FIX PERSISTENȚĂ LISTĂ CONVERSAȚII: adăugăm SID-ul curent în lista
             // locală de "sesiuni cunoscute ale acestui browser", persistată în
@@ -2019,7 +2167,10 @@ def get_or_create_session_id() -> str:
 
     # Valorile din localStorage au fost citite de load_browser_storage_and_login()
     _stored = st.session_state.get("_browser_storage") or {}
-    _stored_sid = str(_stored.get("sid") or "")
+    # întâi conversația acestui tab (refresh), apoi ultima conversație a browserului
+    _stored_sid = str(_stored.get("tabSid") or "")
+    if not is_valid_session_id(_stored_sid):
+        _stored_sid = str(_stored.get("sid") or "")
     if not _force_new and is_valid_session_id(_stored_sid):
         sid = _stored_sid          # browserul a mai folosit aplicația → restaurăm conversația
     else:
@@ -2478,11 +2629,43 @@ load_browser_storage_and_login()
 # Python generează/restaurează SID — poate pune ?sid= în URL pentru JS
 session_id = get_or_create_session_id()
 st.session_state.session_id = session_id
+
+# Tab nou („Conversație nouă”): ?opt= aduce opțiunile tabului de origine (materie + moduri)
+_opt_raw = st.query_params.get("opt", "")
+if _opt_raw:
+    try:
+        del st.query_params["opt"]
+    except Exception:
+        pass
+    try:
+        _opt = json.loads(_opt_raw)
+    except Exception:
+        _opt = None
+    if isinstance(_opt, dict):
+        _opt = {k: v for k, v in _opt.items() if k in _SETARI_BOOL_KEYS + ("materie_selectata",)}
+        _opt["pedagogie_mode"] = _opt["orientare_mode"] = False
+        st.session_state["_pending_new_tab_opt"] = _opt
 update_session_activity(session_id)
 
 # JS citește ?sid= din URL (dacă Python l-a pus) și îl salvează în localStorage
 # La revenire după restart: JS citește SID din localStorage și face reload cu ?sid=
 inject_session_js()
+
+# După „Stop”, rularea se oprește dar bula „Domnul Profesor scrie...” rămânea pe ecran până la următoarea
+# acțiune. Scriptul (instalat o singură dată în pagină) o înlocuiește cu „oprit” când aplicația nu mai rulează.
+components.html("""
+<script>
+(function () {
+  var w = window.parent; if (!w || w.__profTypingWatch) return; w.__profTypingWatch = true;
+  // rulează în pagina principală (nu în iframe), ca să nu se oprească dacă iframe-ul e recreat
+  var code = "(function(){var d=document,idle=0;function running(){return !!d.querySelector('[data-testid=\\\"stStatusWidgetRunningIcon\\\"],[data-testid=\\\"stStatusWidgetRunningManIcon\\\"]');}" +
+    "setInterval(function(){var ind=d.querySelectorAll('.typing-indicator:not([data-stopped])');if(!ind.length){idle=0;return;}" +
+    "idle=running()?0:idle+1;if(idle<3)return;ind.forEach(function(el){el.setAttribute('data-stopped','1');" +
+    "el.innerHTML='<span style=\\\"opacity:.7\\\">\\u23f9\\ufe0f R\\u0103spuns oprit</span>';});},700);})();";
+  var sc = w.document.createElement('script'); sc.textContent = code; w.document.head.appendChild(sc);
+})();
+</script>
+""", height=0)
 
 
 # === API KEYS ===
@@ -6098,6 +6281,10 @@ def update_system_prompt_for_subject(materie: str | None):
 
 
 
+# Opțiunile conversației deschise (materie, moduri) — reselectate o dată per conversație
+restore_session_setari(st.session_state.session_id)
+
+
 safety_settings = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -7531,6 +7718,10 @@ with st.sidebar:
     )
     if pas_cu_pas != st.session_state.get("pas_cu_pas", False):
         st.session_state.pas_cu_pas = pas_cu_pas
+        # Pas cu Pas (calcule detaliate) și Strategie (fără calcule) se contrazic → doar unul activ
+        _strategie_oprita = pas_cu_pas and st.session_state.get("mod_strategie", False)
+        if pas_cu_pas:
+            st.session_state.mod_strategie = False
         # Regenerează prompt-ul cu noul mod
         st.session_state.system_prompt = get_system_prompt(
             materie=st.session_state.get("materie_selectata"),
@@ -7541,7 +7732,8 @@ with st.sidebar:
             mod_engleza=st.session_state.get("mod_engleza", False),
         )
         if pas_cu_pas:
-            st.toast("🔢 Mod Pas cu Pas activat!", icon="✅")
+            st.toast("🔢 Mod Pas cu Pas activat!" + (" (Strategia a fost dezactivată)" if _strategie_oprita else ""),
+                     icon="✅")
         else:
             st.toast("Mod normal activat.", icon="💬")
         st.rerun()
@@ -7557,6 +7749,9 @@ with st.sidebar:
     )
     if mod_strategie != st.session_state.get("mod_strategie", False):
         st.session_state.mod_strategie = mod_strategie
+        _pas_oprit = mod_strategie and st.session_state.get("pas_cu_pas", False)
+        if mod_strategie:
+            st.session_state.pas_cu_pas = False   # doar unul dintre cele două moduri e activ
         st.session_state.system_prompt = get_system_prompt(
             st.session_state.get("materie_selectata"),
             mod_avansat=st.session_state.get("mod_avansat", False),
@@ -7565,7 +7760,8 @@ with st.sidebar:
             mod_bac_intensiv=st.session_state.get("mod_bac_intensiv", False),
             mod_engleza=st.session_state.get("mod_engleza", False),
         )
-        st.toast("🧠 Mod Strategie activat!" if mod_strategie else "Mod normal activat.", icon="✅" if mod_strategie else "💬")
+        st.toast(("🧠 Mod Strategie activat!" + (" (Pas cu Pas a fost dezactivat)" if _pas_oprit else ""))
+                 if mod_strategie else "Mod normal activat.", icon="✅" if mod_strategie else "💬")
         st.rerun()
     if st.session_state.get("mod_strategie"):
         st.info("🧠 **Strategie activ** — înveți să gândești, nu să copiezi.", icon="🗺️")
@@ -7643,6 +7839,9 @@ with st.sidebar:
         help="Dezactivat: răspunsuri rapide (nivel 'low'). Activat: modelul gândește mai "
              "mult înainte să răspundă — util la probleme complexe, dar mai lent."
     )
+
+    # Opțiunile de mai sus aparțin conversației curente → le salvăm (doar când se schimbă)
+    persist_session_setari()
 
     st.divider()
 
@@ -7920,7 +8119,19 @@ with st.sidebar:
 
     # --- Istoric conversații ---
     st.subheader("🕐 Conversații anterioare")
-    if st.button("🔄 Conversație nouă", use_container_width=True):
+    # Tab nou cu opțiunile de acum (materie + moduri); fiecare tab își păstrează conversația și opțiunile.
+    _new_here = False
+    if _newtab_bridge is not None:
+        _opt_now = {k: v for k, v in _current_setari().items() if k not in ("pedagogie_mode", "orientare_mode")}
+        _nt = _newtab_bridge(label="🔄 Conversație nouă", opt=json.dumps(_opt_now), max_tabs=MAX_TABS,
+                             dark=bool(st.session_state.get("dark_mode")), key="_newtab_btn", default=None)
+        if isinstance(_nt, dict) and _nt.get("action") == "same_tab" \
+                and _nt.get("n") != st.session_state.get("_newtab_handled"):
+            st.session_state["_newtab_handled"] = _nt.get("n")
+            _new_here = True
+    else:
+        _new_here = st.button("🔄 Conversație nouă", use_container_width=True)
+    if _new_here:
         _cleanup_gfiles()
         new_sid = generate_unique_session_id()
         register_session(new_sid)
@@ -8166,7 +8377,86 @@ if st.session_state.get("pas_cu_pas"):
         unsafe_allow_html=True
     )
 
+def delete_last_messages_db(session_id: str, n: int):
+    """Șterge din DB ultimele n mesaje (elev/profesor) ale conversației — folosit la modificarea unui mesaj."""
+    if n <= 0 or not is_valid_session_id(session_id) or not is_supabase_available():
+        return
+    try:
+        sb = get_supabase_client()
+        rows = (sb.table("history").select("timestamp").eq("session_id", session_id).eq("app_id", get_app_id())
+                .in_("role", ["user", "assistant"]).order("timestamp", desc=True).limit(n).execute()).data or []
+        if rows:
+            cutoff = min(float(r["timestamp"]) for r in rows)
+            (sb.table("history").delete().eq("session_id", session_id).eq("app_id", get_app_id())
+             .in_("role", ["user", "assistant"]).gte("timestamp", cutoff).execute())
+            invalidate_session_cache()
+    except Exception as e:
+        _log("Mesajele vechi nu au putut fi șterse", "silent", e)
+
+
+def _start_edit():
+    st.session_state["_editing_last_msg"] = True
+    st.session_state.pop("_edit_text", None)
+
+
+def _cancel_edit():
+    st.session_state.pop("_editing_last_msg", None)
+    st.session_state.pop("_edit_text", None)
+
+
+def _replace_last_user_message(text: str):
+    """Scoate ultimul mesaj al elevului (+ răspunsul de după el) și îl trimite din nou, cu textul dat."""
+    msgs = st.session_state.get("messages", [])
+    idx = max((j for j, m in enumerate(msgs) if m.get("role") == "user"), default=-1)
+    if idx < 0 or not text.strip():
+        return
+    removed = len(msgs) - idx
+    st.session_state.messages = msgs[:idx]
+    delete_last_messages_db(st.session_state.session_id, removed)
+    st.session_state["_suggested_question"] = text.strip()
+    st.session_state["_sq_with_attachments"] = text.strip()   # fișierele din „Materiale” se trimit din nou
+    st.session_state.pop("_retry_history", None)
+    st.session_state.pop("_retry_payload", None)
+    st.session_state.pop("_last_user_msg", None)              # altfel debounce-ul l-ar considera duplicat
+
+
+def _submit_edited_message():
+    text = (st.session_state.get("_edit_text") or "").strip()
+    if not text:
+        st.toast("Mesajul nu poate fi gol.", icon="✏️")
+        return
+    _cancel_edit()
+    _replace_last_user_message(text)
+
+
+def _resend_last_message():
+    msgs = st.session_state.get("messages", [])
+    last = next((m["content"] for m in reversed(msgs) if m.get("role") == "user"), "")
+    _replace_last_user_message(last)
+
+
+# ── Modificarea / retrimiterea ultimului mesaj al elevului ──
+_last_user_idx = max((j for j, m in enumerate(st.session_state.messages) if m.get("role") == "user"), default=-1)
+_busy_flow = any(st.session_state.get(k) for k in
+                 ("_pending_user_msg", "_suggested_question", "_pending_retry", "_quick_action"))
+_unanswered = (_last_user_idx >= 0 and _last_user_idx == len(st.session_state.messages) - 1 and not _busy_flow)
+
 for i, msg in enumerate(st.session_state.messages):
+    _is_last_user = (i == _last_user_idx and not _busy_flow)
+    if _is_last_user and st.session_state.get("_editing_last_msg"):
+        with st.chat_message("user"):
+            if "_edit_text" not in st.session_state:
+                st.session_state["_edit_text"] = msg["content"]
+            st.text_area("Modifică mesajul:", key="_edit_text", height=120)
+            if i < len(st.session_state.messages) - 1:
+                st.caption("Răspunsul profesorului la acest mesaj va fi înlocuit cu unul nou.")
+            _e1, _e2 = st.columns(2)
+            with _e1:
+                st.button("📤 Trimite", key="_edit_send", type="primary", use_container_width=True,
+                          on_click=_submit_edited_message)
+            with _e2:
+                st.button("Anulează", key="_edit_cancel", use_container_width=True, on_click=_cancel_edit)
+        continue
     with st.chat_message(msg["role"]):
         if msg["role"] == "assistant":
             content = msg["content"]
@@ -8195,6 +8485,21 @@ for i, msg in enumerate(st.session_state.messages):
                 render_message_with_svg(content)
         else:
             st.markdown(msg["content"])
+            if _is_last_user and not _unanswered:
+                st.button("📝 Modifică", key="_edit_last_user", help="Modifică mesajul și primești un răspuns nou",
+                          on_click=_start_edit)
+
+    if _is_last_user and _unanswered:
+        # Răspunsul a fost oprit (butonul Stop), întrerupt de o eroare sau de închiderea paginii
+        with st.chat_message("assistant"):
+            st.caption("⏹️ Profesorul nu a terminat răspunsul la acest mesaj.")
+            _u1, _u2 = st.columns(2)
+            with _u1:
+                st.button("🔄 Trimite din nou", key="_resend_last", type="primary", use_container_width=True,
+                          on_click=_resend_last_message)
+            with _u2:
+                st.button("📝 Modifică mesajul", key="_edit_unanswered", use_container_width=True,
+                          on_click=_start_edit)
 
     # Butoanele apar DOAR sub ultimul mesaj al profesorului
     if (msg["role"] == "assistant" and
@@ -8312,7 +8617,7 @@ if st.session_state.get("_quick_action"):
             full_response = ""
             message_placeholder.markdown(TYPING_HTML, unsafe_allow_html=True)
             try:
-                for text_chunk in run_chat_with_rotation(history_obj, [injected], live_stream=True):
+                for text_chunk in _iter_interruptible(run_chat_with_rotation(history_obj, [injected], live_stream=True)):
                     full_response += text_chunk
                     message_placeholder.markdown(_stream_preview(full_response))
                 message_placeholder.empty()
@@ -8430,7 +8735,8 @@ if st.session_state.get("_suggested_question"):
 
     # După alegerea materiei, fișierul/poza atașată la mesajul original trebuie să ajungă la model
     # (înainte se pierdea: "rezolvă problema din poză" nu conține cuvinte-cheie de materie).
-    _sq_payload = _build_attachment_payload(media_content, text_file_content) if _already_saved else []
+    _with_att = (st.session_state.pop("_sq_with_attachments", None) == user_input)
+    _sq_payload = _build_attachment_payload(media_content, text_file_content) if (_already_saved or _with_att) else []
     _sq_payload.append(user_input)
 
     # Salvăm pentru retry în caz de eroare de cheie
@@ -8443,7 +8749,7 @@ if st.session_state.get("_suggested_question"):
         full_response = ""
         message_placeholder.markdown(TYPING_HTML, unsafe_allow_html=True)
         try:
-            for text_chunk in run_chat_with_rotation(history_obj, _sq_payload, live_stream=True):
+            for text_chunk in _iter_interruptible(run_chat_with_rotation(history_obj, _sq_payload, live_stream=True)):
                 full_response += text_chunk
                 message_placeholder.markdown(_stream_preview(full_response))
             message_placeholder.empty()
@@ -8927,7 +9233,7 @@ if st.session_state.pop("_pending_retry", False):
             _rph.markdown(TYPING_HTML, unsafe_allow_html=True)
             _rfull = ""
             try:
-                for _chunk in run_chat_with_rotation(_retry_history, _retry_payload, live_stream=True):
+                for _chunk in _iter_interruptible(run_chat_with_rotation(_retry_history, _retry_payload, live_stream=True)):
                     _rfull += _chunk
                     _rph.markdown(_stream_preview(_rfull))
                 _rph.empty()
@@ -9328,6 +9634,7 @@ if user_input := st.chat_input("Întreabă profesorul..."):
         st.session_state["_retry_history"] = history_obj
         st.session_state["_retry_payload"] = final_payload
 
+        _chat_ok = False
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             full_response = ""
@@ -9336,7 +9643,7 @@ if user_input := st.chat_input("Întreabă profesorul..."):
             message_placeholder.markdown(TYPING_HTML, unsafe_allow_html=True)
 
             try:
-                stream_generator = run_chat_with_rotation(history_obj, final_payload, live_stream=True)
+                stream_generator = _iter_interruptible(run_chat_with_rotation(history_obj, final_payload, live_stream=True))
                 first_chunk = True
 
                 for text_chunk in stream_generator:
@@ -9354,6 +9661,7 @@ if user_input := st.chat_input("Întreabă profesorul..."):
                 # Răspuns reușit — curățăm datele de retry
                 st.session_state.pop("_retry_history", None)
                 st.session_state.pop("_retry_payload", None)
+                _chat_ok = True
 
             except Exception as e:
                 if not _salvage_partial_response(e, full_response, message_placeholder, "chat"):
@@ -9369,3 +9677,7 @@ if user_input := st.chat_input("Întreabă profesorul..."):
                                   on_click=_request_retry)
                     else:
                         _show_ai_error(e, "chat")
+        # O rulare nouă afișează sub răspuns butoanele „Nu am înțeles / Exercițiu similar / ...”
+        # și „📝 Modifică” sub mesajul elevului (altfel apăreau abia la următoarea acțiune).
+        if _chat_ok:
+            st.rerun()

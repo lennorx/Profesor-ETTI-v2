@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; font-family: "Source Sans Pro", "Source Sans 3", sans-serif; }
+  button {
+    width: 100%; box-sizing: border-box; min-height: 38px; padding: 6px 12px; cursor: pointer;
+    font-size: 15px; line-height: 1.4; border-radius: 8px; border: 1px solid rgba(49, 51, 63, 0.2);
+    background: #ffffff; color: #31333f; font-family: inherit;
+  }
+  button:hover { border-color: #ff4b4b; color: #ff4b4b; }
+  body.dark button { background: #262730; color: #fafafa; border-color: rgba(250, 250, 250, 0.2); }
+  body.dark button:hover { border-color: #ff4b4b; color: #ff4b4b; }
+  .msg { font-size: 13px; margin: 8px 2px 6px; color: #9c5700; line-height: 1.35; }
+  body.dark .msg { color: #ffbd45; }
+  .hidden { display: none; }
+  .row { display: flex; gap: 6px; }
+  .row button { font-size: 13px; }
+</style>
+</head>
+<body>
+<button id="newtab">🔄 Conversație nouă</button>
+<div id="limit" class="hidden">
+  <div class="msg" id="limitmsg"></div>
+  <div class="row">
+    <button id="here">Deschide aici</button>
+    <button id="cancel">Renunț</button>
+  </div>
+</div>
+<script>
+// „Conversație nouă” = un TAB nou al browserului (maxim N taburi deschise).
+// Taburile deschise se numără printr-un registru în localStorage: fiecare tab își actualizează
+// periodic intrarea și o șterge la închidere; intrările vechi (tab închis brusc) expiră.
+(function () {
+  var REG = "profesor_open_tabs";
+  var STALE_MS = 90 * 1000;            // taburile din fundal sunt „încetinite” de browser (~1 tick/min)
+  var TARGET = window.location.origin;
+  var maxTabs = 5, opt = "{}";
+  var tabId;
+  try {
+    tabId = sessionStorage.getItem("profesor_tab_id");
+    if (!tabId) { tabId = Math.random().toString(36).slice(2) + Date.now().toString(36); sessionStorage.setItem("profesor_tab_id", tabId); }
+  } catch (e) { tabId = "t" + Math.random().toString(36).slice(2); }
+
+  function post(type, extra) {
+    var m = { isStreamlitMessage: true, type: type };
+    for (var k in extra) { m[k] = extra[k]; }
+    window.parent.postMessage(m, TARGET);
+  }
+  function height() { post("streamlit:setFrameHeight", { height: document.body.scrollHeight + 2 }); }
+
+  function readReg() {
+    try { var r = JSON.parse(localStorage.getItem(REG) || "{}"); return (r && typeof r === "object") ? r : {}; }
+    catch (e) { return {}; }
+  }
+  function writeReg(r) { try { localStorage.setItem(REG, JSON.stringify(r)); } catch (e) {} }
+  function beat() {
+    var r = readReg(), now = Date.now();
+    for (var k in r) { if (now - r[k] > STALE_MS) delete r[k]; }
+    r[tabId] = now; writeReg(r);
+  }
+  function openCount() {
+    var r = readReg(), now = Date.now(), n = 0;
+    for (var k in r) { if (now - r[k] <= STALE_MS) n++; }
+    return Math.max(n, 1);
+  }
+  beat();
+  setInterval(beat, 5000);
+  document.addEventListener("visibilitychange", beat);
+  window.addEventListener("pagehide", function () { var r = readReg(); delete r[tabId]; writeReg(r); });
+
+  function showLimit(on, n) {
+    document.getElementById("limit").className = on ? "" : "hidden";
+    if (on) {
+      document.getElementById("limitmsg").textContent =
+        "Ai deja " + n + " taburi deschise (maxim " + maxTabs + "). Închide un tab sau deschide conversația nouă în acesta.";
+    }
+    height();
+  }
+
+  document.getElementById("newtab").addEventListener("click", function () {
+    beat();
+    var n = openCount();
+    if (n >= maxTabs) { showLimit(true, n); return; }
+    var p = window.parent.location;
+    var url = p.origin + p.pathname + "?new=1&opt=" + encodeURIComponent(opt);
+    window.open(url, "_blank", "noopener");
+  });
+  document.getElementById("here").addEventListener("click", function () {
+    showLimit(false);
+    post("streamlit:setComponentValue", { value: { action: "same_tab", n: Date.now() }, dataType: "json" });
+  });
+  document.getElementById("cancel").addEventListener("click", function () { showLimit(false); });
+
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    var a = e.data.args || {};
+    if (a.max_tabs) maxTabs = a.max_tabs;
+    if (a.opt) opt = a.opt;
+    document.body.className = a.dark ? "dark" : "";
+    if (a.label) document.getElementById("newtab").textContent = a.label;
+    height();
+  });
+  post("streamlit:componentReady", { apiVersion: 1 });
+  height();
+})();
+</script>
+</body>
+</html>

@@ -32,6 +32,7 @@ SUITE = {
     "retry_test":  (True,  [], ""),
     "keys_test":   (False, [], ""),
     "subjects_test": (True, [], ""),
+    "tabs_test":   (True,  [], ""),
     "photo_test":  (False, ["nokey"], ""),
     "photo_test:ocr": (False, ["ocr"], 'OCR_API_KEY = "AIzaOCRKEY000000000000000"\n'),
 }
@@ -42,7 +43,7 @@ def run(name: str) -> tuple[int, int, str]:
     with tempfile.TemporaryDirectory() as d:
         d = pathlib.Path(d)
         shutil.copy(ROOT / APP, d / "app_under_test.py")
-        for comp in ("session_bridge", "key_bridge"):
+        for comp in ("session_bridge", "key_bridge", "newtab_bridge"):
             if (ROOT / comp).exists():
                 shutil.copytree(ROOT / comp, d / comp)
         shutil.copy(TESTS / "fake_sb.py", d / "fake_sb.py")

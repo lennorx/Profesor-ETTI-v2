@@ -21,8 +21,11 @@
   }
 
   function readStorage() {
-    var out = { sid: "", known: [], token: "", storage: true };
+    var out = { sid: "", tabSid: "", known: [], token: "", storage: true };
     try {
+      // conversația acestui TAB (sessionStorage e separat pe fiecare tab și rezistă la refresh);
+      // localStorage e comun tuturor taburilor → doar pentru un tab nou / redeschiderea browserului
+      try { out.tabSid = sessionStorage.getItem("profesor_tab_sid") || ""; } catch (e2) {}
       out.sid = localStorage.getItem(SID_KEY) || "";
       out.token = localStorage.getItem(TOKEN_KEY) || "";  // „ține-mă minte” (cont ETTI)
       var known = JSON.parse(localStorage.getItem(KNOWN_KEY) || "[]");
