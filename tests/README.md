@@ -8,7 +8,7 @@ pip install -r requirements.txt
 python3 tests/run_tests.py              # toate (~5–10 minute)
 python3 tests/run_tests.py auth_test    # doar unul
 python3 tests/run_tests.py -v           # arată fiecare verificare
-APP_FILE=profesor_etti_specializari.py python3 tests/run_tests.py   # alt fișier de aplicație
+APP_FILE=alt_fisier.py python3 tests/run_tests.py   # alt fișier de aplicație (ex. repo-ul Anul III-IV)
 ```
 
 | Test | Ce verifică |
