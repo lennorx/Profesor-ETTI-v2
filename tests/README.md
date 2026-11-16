@@ -21,6 +21,7 @@ APP_FILE=alt_fisier.py python3 tests/run_tests.py   # alt fișier de aplicație 
 | `keys_test` | chei API în cont: criptare, etichete, cheie invalidă/duplicat respinse, trecerea Mama → Tata la epuizare, alt dispozitiv, ștergere |
 | `subjects_test` | toate materiile au prompt / cuvinte cheie / indicatori / întrebări; butoanele materiilor noi; promptul corect ajunge la AI; detecția automată (materii noi + regresii) |
 | `tabs_test` | opțiunile salvate pe conversație (`sessions.setari`) și reselectate la click în listă / refresh / alt dispozitiv; tab nou cu `?new=1&opt=`; refresh pe tab (sessionStorage); Pas cu Pas ↔ Strategie exclusive; „📝 Modifică” ultimul mesaj; „Trimite din nou” la mesaj fără răspuns |
+| `orient_test` | „🧭 Orientare Specializare”: conversație nouă (URL actualizat), ghidul actualizat ajunge la AI chiar cu o materie selectată, conversația redeschisă rămâne în orientare |
 | `photo_test` | cheia citită din poză: fără nicio cheie (mesaj), cu `OCR_API_KEY`, cheie ruptă pe 2 rânduri |
 
 Pentru altă aplicație de profesor virtual: copiază folderul `tests/`, rulează cu `APP_FILE=...` și

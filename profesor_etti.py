@@ -1246,12 +1246,14 @@ def _apply_setari(setari: dict):
     st.session_state["materie_selectata"] = _mat
     _an = setari.get("an_studiu")
     st.session_state["an_studiu"] = _an if _an in ("I", "II") else (MATERIE_AN.get(_mat) or "I")
-    if _mat:
-        st.session_state["_detected_subject"] = _mat
+    # Sfaturi de studiu / Orientare au prioritate: materia rămasă selectată din conversația de
+    # dinainte nu trebuie să înlocuiască ghidul de orientare la redeschidere.
+    if setari.get("orientare_mode"):
+        st.session_state["_detected_subject"] = "orientare_specializare"
     elif setari.get("pedagogie_mode"):
         st.session_state["_detected_subject"] = "pedagogie"
-    elif setari.get("orientare_mode"):
-        st.session_state["_detected_subject"] = "orientare_specializare"
+    elif _mat:
+        st.session_state["_detected_subject"] = _mat
     update_system_prompt_for_subject(st.session_state.get("_detected_subject"))   # promptul cu opțiunile restaurate
 
 
@@ -3073,7 +3075,7 @@ def _an_din_eticheta(label: str):
 
 
 MATERIE_AN = {cod: _an_din_eticheta(label) for label, cod in MATERII.items() if cod}
-# NOTĂ: la finalul anului II, disciplinele se ramifică pe specializare (ELA/TST/RST/MON/INF).
+# NOTĂ: din anul III, disciplinele se ramifică pe program (ELA/TST/RST/MON aleși în anul II la IETTI; INF = domeniul CTI).
 # Se adaugă blocurile aferente în MATERII + _PROMPT_SUBJECTS pe măsură ce studentul avansează.
 
 # Label-ul modului automat — folosit în mai multe locuri
@@ -4158,132 +4160,164 @@ _PROMPT_SUBJECTS: dict[str, str] = {
     """,
 
     "orientare_specializare": r"""
-    GHID DE SPECIALIZĂRI ETTI-UPB — pentru orientarea studentului la finalul anului II.
+    GHID DE SPECIALIZĂRI ETTI-UPB — pentru orientarea studentului înainte de alegerea din anul II.
+    (Verificat pe etti.upb.ro, fise-discipline.etti.upb.ro și în presă — noiembrie 2026.)
 
-    STRUCTURĂ: Anii I-II sunt trunchi comun. La finalul anului II, studentul alege UNA din
-    cele 5 specializări pentru anii III-IV. Fiecare specializare de mai jos include:
-    denumire completă, disciplinele-cheie din anii III-IV, tipul de job la care pregătește,
-    și exemple REALE de angajatori din România (verificate, cu notă de actualitate).
+    STRUCTURĂ — CE SE ALEGE ȘI CINE ALEGE (important, explică-l corect):
+    - ETTI are DOUĂ domenii de licență, cu admitere separată:
+      • IETTI — Inginerie Electronică, Telecomunicații și Tehnologii Informaționale: anii I-II
+        sunt trunchi comun; în anul II studenții își aleg programul de studii (specializarea)
+        pentru anii III-IV dintre ELA, TST, RST, MON. Seria în limba engleză poate alege doar
+        ELA sau TST.
+      • CTI — Calculatoare și Tehnologia Informației: are un SINGUR program, INF (Ingineria
+        Informației). Studenții CTI NU aleg — sunt repartizați automat la INF. De aceea anii
+        I-II de la INF au și câteva discipline diferite de IETTI.
+    - Trecerea între domenii (IETTI ↔ CTI) e posibilă doar pentru un număr limitat de studenți,
+      în funcție de locurile disponibile și de medie, pe bază de cerere.
+    - Opțiunile se completează online (formular pe etti.pub.ro/specializari), spre finalul
+      anului II; în 2026 termenul a fost 6 septembrie. Data exactă și regulile se anunță în
+      fiecare an pe etti.upb.ro (Studenți → Repartizare programe de studii) — spune-i
+      studentului să verifice acolo, nu da o dată fixă ca sigură pentru anul lui.
 
-    ══════════════════════════════════════════
-    1. ELA — ELECTRONICĂ APLICATĂ
-    ══════════════════════════════════════════
-    Disciplinele-cheie anii III-IV: Circuite integrate analogice, Instrumentație electronică
-    de măsură, Automatizări în electronică, Compatibilitate electromagnetică, Optoelectronică,
-    Prelucrarea digitală a semnalelor, Microunde, Electronică și informatică industrială,
-    Rețele neurale, Imagistică medicală, Electronică și informatică medicală, Procesoare
-    electronice de putere, Robotică, Testarea automată a echipamentelor, Sisteme de
-    comunicații mobile.
-
-    Profil: cea mai GENERALISTĂ dintre specializări — combină electronica analogică/digitală
-    cu aplicații practice în industrie, medical, auto. Potrivită pentru cei care vor să rămână
-    "aproape de hardware" dar cu flexibilitate mare de domeniu final.
-
-    Piața muncii: cerere largă și stabilă — electronica aplicată se regăsește în auto,
-    industrial, medical, producție. Exemple verificate de angajatori cu operațiuni în
-    România (2025-2026): Continental / AUMOVIO (compania s-a desprins de Continental în
-    septembrie 2025, continuă activitatea de electronică auto), producători de electronică
-    contractuală precum Flex (Oradea, Timișoara), Jabil (Brașov — componente pentru medical,
-    telecom, auto), Celestica (București — echipamente pentru telecom și medical), Kromberg
-    & Schubert (Alba Iulia, Câmpulung Muscel — cablaje auto). Aceste companii au recrutare
-    constantă pentru ingineri de proiectare, testare și calitate.
+    DISCIPLINE COMUNE ÎN ANUL III (toate programele, inclusiv INF): Semnale și sisteme 3,
+    Teoria transmisiunii informației, Decizie și estimare în prelucrarea informațiilor,
+    Prelucrarea digitală a semnalelor, Microunde. ELA/TST/RST/MON mai au în comun Circuite
+    integrate analogice și Instrumentație electronică de măsură. În anul IV, Calitate și
+    fiabilitate e comună ELA/TST/RST/INF.
+    (Listele de mai jos = disciplinele OBLIGATORII din planurile 2024-2028; fiecare program
+    are și pachete de opționale, care se pot schimba de la an la an.)
 
     ══════════════════════════════════════════
-    2. TST — TEHNOLOGII ȘI SISTEME DE TELECOMUNICAȚII
+    1. ELA — ELECTRONICĂ APLICATĂ (domeniul IETTI; există și în limba engleză)
     ══════════════════════════════════════════
-    Disciplinele-cheie anii III-IV: Microunde, Antene și propagare, Sisteme și echipamente
-    de comunicații radio, Rețele de comunicații mobile, Comunicații optice, Radar,
-    Comunicații de date, Instrumentație electronică de măsură.
+    Anul III (pe lângă cele comune): Inteligență artificială, Televiziune, Bazele sistemelor
+    de achiziție de date, Rețele neurale și sisteme fuzzy, Electronică și informatică
+    industrială. Anul IV: Procesoare electronice de putere, Analiza asistată de calculator a
+    circuitelor de putere, Robotică, Testarea automată a echipamentelor, Imagistică medicală,
+    Electronică și informatică medicală, Grafică 3D, Sisteme de comunicații mobile, Tehnologii
+    de programare în Internet, Arhitectura sistemelor de calcul.
 
-    Profil: focus pe partea de HARDWARE și RF a telecomunicațiilor — cum se propagă și se
-    transmite semnalul (antene, microunde, radio, optic), nu pe partea de software/rețele
-    de date. Potrivită pentru cei atrași de fizica semnalului și sistemele radio/satelit.
+    Profil: cea mai GENERALISTĂ — electronică analogică/digitală cu aplicații în industrie,
+    auto, medical, putere, robotică. Potrivită pentru cei care vor să rămână „aproape de
+    hardware", dar cu flexibilitate mare de domeniu final.
 
-    Piața muncii: operatorii de telecomunicații din România au nevoie constantă de ingineri
-    de rețea și infrastructură RF. Situația pieței (verificată, ianuarie 2026): Orange
-    România e liderul pieței de comunicații mobile ca venituri, urmat de Vodafone România
-    (care a preluat operațiunile Telekom Romania Mobile în 2025-2026) și DIGI România —
-    trei operatori mari, în urma consolidării pieței. Aceștia recrutează constant ingineri
-    de rețea, RF și infrastructură.
-
-    ══════════════════════════════════════════
-    3. RST — REȚELE ȘI SOFTWARE DE TELECOMUNICAȚII
-    ══════════════════════════════════════════
-    Disciplinele-cheie anii III-IV: Arhitecturi și protocoale de comunicații, Tehnologii de
-    programare în Internet, Securitatea rețelelor și serviciilor, Detecția și prevenția
-    atacurilor cibernetice, Servicii de cloud și containerizare, Introducere în sisteme de
-    operare și virtualizare, Bazele criptologiei, Rețele de comunicații mobile.
-
-    Profil: focus pe partea de SOFTWARE și SECURITATE a telecomunicațiilor — protocoale de
-    rețea, cloud, securitate cibernetică. Cea mai apropiată de IT/software dintre
-    specializările de telecomunicații. Potrivită pentru cei interesați de rețelistică,
-    securitate cibernetică și infrastructură cloud, nu de circuite.
-
-    Piața muncii: cerere mare pentru securitate cibernetică și rețelistică. România are un
-    jucător global recunoscut în securitate cibernetică — Bitdefender (companie românească,
-    sediul central în București, prezență internațională) — un exemplu relevant pentru
-    cariera în securitate. La acestea se adaugă operatorii de telecom (Orange, Vodafone,
-    DIGI) pentru partea de rețele/infrastructură, și companii internaționale de IT cu
-    departamente de securitate/cloud.
+    Piața muncii (exemple verificate, 2025-2026):
+    - AUMOVIO — fostul sector Automotive al Continental, independent din septembrie 2025;
+      în România: centre de cercetare-dezvoltare la Brașov, Iași, Sibiu, Timișoara și fabrici
+      la Sibiu și Timișoara, ~13.000 de angajați (peste jumătate ingineri și specialiști IT).
+      Onest: compania a anunțat la finalul lui 2025 și reduceri de personal (641 de posturi în
+      Iași, Sibiu, Timișoara) — industria auto trece printr-o perioadă mai dificilă.
+    - Producție și proiectare de electronică (EMS): Flex (Timișoara — centru de proiectare,
+      fabrică și centru de servicii), Plexus (Oradea — fabrică și centru de proiectare),
+      Celestica (Oradea/Borș — echipamente pentru industrie, energie, medical).
+    - Semiconductori și sisteme embedded (vezi și MON): NXP (București și Sibiu), Infineon,
+      onsemi — angajează și absolvenți ELA pentru aplicații, testare, validare.
 
     ══════════════════════════════════════════
-    4. MON — MICROELECTRONICĂ, OPTOELECTRONICĂ ȘI NANOTEHNOLOGII
+    2. TST — TEHNOLOGII ȘI SISTEME DE TELECOMUNICAȚII (IETTI; există și în limba engleză)
     ══════════════════════════════════════════
-    Disciplinele-cheie anii III-IV: Tehnici de proiectare pentru structuri VLSI, Bazele
-    tehnologice ale microelectronicii, Dispozitive optoelectronice, Testare și
-    instrumentație virtuală în microelectronică, Modelarea componentelor microelectronice
-    active, Senzori și traductori fotonici, Circuite integrate de joasă tensiune și mică
-    putere, Dispozitive dielectrice și magnetice.
+    Anul III: Arhitecturi de rețea și Internet, Circuite de microunde, Comunicații analogice
+    și digitale. Anul IV: Antene și propagare, Sisteme și echipamente de comunicații radio,
+    Rețele de comunicații, Rețele de comunicații mobile, Comunicații de date, Comunicații
+    analogice și digitale (laborator), Inteligență artificială, Detecția și prevenția
+    atacurilor cibernetice, Servicii de cloud și containerizare.
 
-    Profil: cea mai SPECIALIZATĂ și tehnică dintre toate — proiectarea propriu-zisă a
-    cipurilor (chip design) la nivel de siliciu. Necesită apetit puternic pentru electronică
-    analogică avansată și fizica dispozitivelor semiconductoare. E specializarea cu cea mai
-    mare "barieră de intrare" dar și cu cea mai rară și căutată expertiză.
+    Profil: accent pe partea de HARDWARE și RADIO a telecomunicațiilor — cum se transmite și
+    se propagă semnalul (antene, microunde, radio, rețele mobile). Potrivită pentru cei atrași
+    de fizica semnalului și de sistemele radio.
 
-    Piața muncii: DOMENIU CU CEA MAI MARE CREȘTERE RECENTĂ ȘI CERERE ÎN ROMÂNIA (verificat,
-    iunie 2026) — Infineon Technologies, cea mai puternică companie de semiconductori din
-    România, a deschis în 2026 al patrulea centru de cercetare (la Cluj-Napoca), specializat
-    exact pe proiectarea de circuite integrate analogice și cu semnal mixt pentru industria
-    auto — o competență descrisă explicit de companie ca fiind "rară și căutată la nivel
-    internațional". Infineon are peste 850 de angajați în România, din care peste 700 în
-    cercetare-dezvoltare, cu centre la Cluj-Napoca și Brașov. Pentru un student atras de
-    hardware la nivel fundamental, MON oferă acces la exact acest tip de poziții — puține
-    universități din regiune pregătesc explicit pe design de cipuri analogice.
+    Piața muncii: după consolidarea pieței, de la 1 iulie 2026 România are trei operatori
+    mobili — Orange, Vodafone (care a preluat Telekom România Mobile: achiziție la 1 octombrie
+    2025, fuziune finalizată la 30 iunie 2026) și Digi (a preluat clienții prepaid și o parte
+    din infrastructura Telekom). Înainte de tranzacție, cotele ANCOM erau: Orange 33,6%,
+    Digi 29,9%, Vodafone 24,5%. Operatorii recrutează ingineri de rețea, RF și infrastructură;
+    pe lângă ei, furnizorii de echipamente și integratorii de rețele.
 
     ══════════════════════════════════════════
-    5. INF — INGINERIE INFORMATICĂ
+    3. RST — REȚELE ȘI SOFTWARE DE TELECOMUNICAȚII (IETTI)
     ══════════════════════════════════════════
-    Disciplinele-cheie anii III-IV: Rețele de calculatoare, Algoritmi paraleli și
-    distribuiți, Inteligență artificială — recunoașterea formelor, Prelucrarea imaginilor,
-    Inginerie software, Procesoare de semnal, Interfețe om-mașină, Sisteme de operare,
-    Sisteme de comunicații, Robotică și agenți inteligenți.
+    Anul III: Comunicații analogice și digitale, Tehnologii de programare în Internet,
+    Arhitecturi și protocoale de comunicații. Anul IV: Rețele și servicii, Inginerie software
+    pentru comunicații, Sisteme de operare, Comunicații de date, Rețele de comunicații mobile,
+    Detecția și prevenția atacurilor cibernetice, Servicii de cloud și containerizare,
+    Arhitectura sistemelor de calcul, Inteligență artificială. Opțional, printre altele:
+    Bazele criptologiei 1-2.
 
-    Profil: cea mai apropiată de un program clasic de „Computer Science" — puțin hardware,
-    accent pe programare, algoritmi, AI, inginerie software. Potrivită pentru cei atrași
-    predominant de partea de cod/software, nu de circuite.
+    Profil: partea de SOFTWARE și SECURITATE a telecomunicațiilor — protocoale, rețele, cloud,
+    securitate cibernetică. Cea mai apropiată de IT dintre programele IETTI. Potrivită pentru
+    cei interesați de rețelistică, securitate și cloud, nu de circuite.
 
-    Piața muncii: cea mai LARGĂ piață de angajare ca volum — București e un hub tehnologic
-    consacrat de mult timp, cu prezență stabilă a multor companii internaționale de
-    IT/software (centre de dezvoltare software, cercetare, servicii). NOTĂ DE ONESTITATE:
-    nu am date verificate recente cu nume exacte de companii pentru acest domeniu în acest
-    ghid — recomand studentului să verifice el însuși joburile active (ex: LinkedIn, Hipo.ro,
-    eJobs) pentru lista curentă de angajatori IT din București, care se schimbă frecvent.
+    Piața muncii: cerere mare pentru rețelistică și securitate cibernetică. Exemplu românesc
+    relevant: Bitdefender (sediul central în București, prezență internațională). Plus
+    operatorii de telecom (Orange, Vodafone, Digi) și companiile de IT cu echipe de rețele,
+    cloud și securitate.
+
+    ══════════════════════════════════════════
+    4. MON — MICROELECTRONICĂ, OPTOELECTRONICĂ ȘI NANOTEHNOLOGII (IETTI)
+    ══════════════════════════════════════════
+    Anul III: aceleași discipline ca ELA (Inteligență artificială, Televiziune, Bazele
+    sistemelor de achiziție de date, Rețele neurale și sisteme fuzzy, Electronică și
+    informatică industrială). Anul IV: Tehnici de proiectare pentru structuri VLSI, Bazele
+    tehnologice ale microelectronicii, Modelarea componentelor microelectronice active,
+    Circuite integrate de joasă tensiune și mică putere, Dispozitive optoelectronice, Senzori
+    și traductori fotonici, Dispozitive dielectrice și magnetice, Testare și instrumentație
+    virtuală în microelectronică, Tehnici avansate de prelucrare digitală a semnalelor,
+    Arhitectura sistemelor de calcul.
+
+    Profil: cea mai SPECIALIZATĂ — proiectarea cipurilor (circuite integrate analogice, cu
+    semnal mixt, VLSI) și fizica dispozitivelor. Cere apetit pentru electronică analogică
+    avansată și fizica semiconductoarelor; barieră de intrare mare, expertiză rară și căutată.
+
+    Piața muncii (verificat, 2026) — domeniu în creștere în România:
+    - Infineon Technologies: peste 850 de angajați în România, peste 700 în
+      cercetare-dezvoltare. București e polul principal (cel mai mare centru R&D de
+      semiconductori al companiei din Europa de Sud-Est); centre și la Iași, Brașov și, din
+      iunie 2026, Cluj-Napoca (al patrulea centru de excelență, proiectare de circuite
+      integrate analogice și cu semnal mixt pentru auto); extindere recentă și la Timișoara.
+    - onsemi: centru de proiectare de cipuri în București (proiectare de circuite integrate,
+      layout, testare, aplicații), aproape de Politehnică — UPB e universitatea parteneră.
+    - NXP România: peste 1.000 de angajați, R&D în București și Sibiu (microcontrolere,
+      microprocesoare, software embedded pentru auto și IoT).
+    Puține programe din regiune pregătesc explicit pentru proiectarea de cipuri — MON e
+    drumul cel mai direct spre aceste poziții.
+
+    ══════════════════════════════════════════
+    5. INF — INGINERIA INFORMAȚIEI (domeniul CTI — admitere separată, fără alegere în anul II)
+    ══════════════════════════════════════════
+    Anul III (pe lângă cele comune): Achiziția și prelucrarea datelor, Măsurători
+    electronice, senzori și traductoare 2, Instrumentație virtuală, Programare web, Tehnici de
+    optimizare, Arhitectura sistemelor de calcul, Inteligență artificială 1, Televiziune.
+    Anul IV: Rețele de calculatoare, Algoritmi paraleli și distribuiți, Inteligență
+    artificială 2 — Recunoașterea formelor, Prelucrarea imaginilor, Analiza imaginilor,
+    Inginerie software, Procesoare de semnal, Interfețe om-mașină, Sisteme de comunicații,
+    Sisteme de operare 2.
+
+    Profil: cel mai apropiat de calculatoare — programare, algoritmi, AI, prelucrarea
+    imaginilor, inginerie software, cu o bază de electronică și semnale. Potrivit pentru cei
+    atrași predominant de cod.
+
+    Piața muncii: cea mai largă ca volum — București e un hub tehnologic cu multe centre de
+    dezvoltare software. Exemple verificate: NXP (software embedded, București și Sibiu),
+    Bitdefender (București). Pentru lista curentă de angajatori IT, recomandă-i să verifice
+    joburile active (LinkedIn, Hipo.ro, eJobs) — se schimbă des.
 
     ══════════════════════════════════════════
     CUM SĂ GHIDEZI CONVERSAȚIA
     ══════════════════════════════════════════
-    - Întreabă ce a plăcut mai mult studentului până acum: Bazele Electrotehnicii/Fizica
-      (→ ELA/TST/MON, direcție hardware) sau Programarea Calculatoarelor (→ RST/INF, direcție
-      software)?
-    - Întreabă cât de mult îl atrage teoria avansată/matematica grea vs. aplicații practice
-      imediate — MON cere cea mai solidă bază teoretică; ELA e cea mai practică.
-    - Menționează ÎNTOTDEAUNA că alegerea nu e ireversibilă ca traiectorie de carieră —
-      competențele de bază (programare, circuite, matematică) sunt transferabile, iar mulți
-      ingineri își schimbă direcția de specializare în cariera profesională.
-    - NU inventa nume de companii sau cifre — folosește DOAR informațiile verificate din
-      acest ghid; dacă studentul cere detalii suplimentare (salarii exacte, alte companii),
-      recomandă-i să caute surse actuale (Hipo.ro, LinkedIn, eJobs), pentru că piața muncii
-      se schimbă mai des decât acest ghid poate fi actualizat.
+    - Află întâi la ce domeniu e studentul: IETTI (alege între ELA, TST, RST, MON) sau CTI
+      (e deja la INF). Dacă e la IETTI și îl atrage INF (sau invers), explică-i că trecerea
+      între domenii e limitată și depinde de locuri și de medie.
+    - Întreabă ce i-a plăcut mai mult până acum: Bazele electrotehnicii, Dispozitive și
+      Circuite electronice, Fizica (→ ELA / MON, direcție hardware), Semnale și sisteme,
+      partea de radio și transmisii (→ TST) sau Programarea și Bazele de date (→ RST, iar
+      în domeniul CTI → INF).
+    - Întreabă cât îl atrage teoria avansată vs. aplicațiile practice imediate — MON cere cea
+      mai solidă bază teoretică (fizica semiconductoarelor), ELA e cea mai practică și largă.
+    - Menționează ÎNTOTDEAUNA că alegerea nu blochează cariera: bazele (programare, circuite,
+      semnale, matematică) se transferă, iar masteratul permite reorientarea.
+    - NU inventa nume de companii, cifre, salarii sau date — folosește DOAR informațiile din
+      acest ghid; pentru detalii suplimentare (salarii, alte companii, calendarul exact al
+      anului curent) recomandă surse actuale: etti.upb.ro, Hipo.ro, LinkedIn, eJobs.
     """,
 
     "semnale și sisteme": r"""
@@ -5561,8 +5595,9 @@ def get_system_prompt(materie: str | None = None, pas_cu_pas: bool = False,
     elif materie == "orientare_specializare":
         rol_line = (
             "ROL: Ești un consilier de carieră și orientare academică la Facultatea ETTI, "
-            "Universitatea Politehnica din București, cu cunoștințe detaliate despre cele 5 "
-            "specializări disponibile la finalul anului II (ELA, TST, RST, MON, INF), despre "
+            "Universitatea Politehnica din București, cu cunoștințe detaliate despre programele "
+            "de studii din anii III-IV (ELA, TST, RST, MON din domeniul IETTI, alese în anul II; "
+            "INF, singurul program al domeniului CTI, fără alegere), despre "
             "curriculumul fiecăreia și despre piața muncii din România pentru fiecare domeniu. "
             "Studentul e la început de facultate sau în anul II și vrea să înțeleagă ce specializare "
             "i se potrivește. NU dai o recomandare fermă din prima replică — pui întrebări despre "
@@ -7521,6 +7556,7 @@ with st.sidebar:
             _ped_sid = generate_unique_session_id()
             register_session(_ped_sid)
             st.session_state["session_id"] = _ped_sid
+            st.query_params["sid"] = _ped_sid   # altfel ?sid= vechi din URL redeschide conversația anterioară
             st.session_state["messages"]   = []
             # FIX 1: adăugăm sesiunea de pedagogie în lista locală — apare în sidebar
             _my_sids = st.session_state.get("_my_session_ids", [])
@@ -7566,6 +7602,7 @@ with st.sidebar:
             if _prev_sid and is_valid_session_id(_prev_sid):
                 # Restaurăm sesiunea anterioară
                 st.session_state["session_id"]        = _prev_sid
+                st.query_params["sid"] = _prev_sid   # altfel ?sid= vechi din URL redeschide conversația anterioară
                 st.session_state["messages"]          = _prev_msg
                 st.session_state["materie_selectata"] = _prev_mat
                 st.session_state["_detected_subject"] = _prev_det
@@ -7591,6 +7628,7 @@ with st.sidebar:
                 _new_main_sid = generate_unique_session_id()
                 register_session(_new_main_sid)
                 st.session_state["session_id"]        = _new_main_sid
+                st.query_params["sid"] = _new_main_sid   # altfel ?sid= vechi din URL redeschide conversația anterioară
                 st.session_state["messages"]          = []
                 st.session_state["materie_selectata"] = None
                 st.session_state.pop("_detected_subject", None)
@@ -7621,7 +7659,7 @@ with st.sidebar:
     _orient_toggle = st.toggle(
         "🧭 Orientare Specializare",
         value=_orient_active,
-        help="Activează pentru a te ajuta să alegi specializarea (ELA/TST/RST/MON/INF) la finalul anului II — cu detalii despre curriculum și piața muncii. Dezactivează pentru a reveni la profesor."
+        help="Te ajută să alegi programul pentru anii III-IV (ELA, TST, RST sau MON — alegerea din anul II la domeniul IETTI; INF are admitere separată), cu disciplinele fiecăruia și piața muncii. Dezactivează pentru a reveni la profesor."
     )
 
     if _orient_toggle != _orient_active:
@@ -7637,6 +7675,7 @@ with st.sidebar:
             _orient_sid = generate_unique_session_id()
             register_session(_orient_sid)
             st.session_state["session_id"] = _orient_sid
+            st.query_params["sid"] = _orient_sid   # altfel ?sid= vechi din URL redeschide conversația anterioară
             st.session_state["messages"]   = []
             _my_sids = st.session_state.get("_my_session_ids", [])
             if _orient_sid not in _my_sids:
@@ -7679,6 +7718,7 @@ with st.sidebar:
 
             if _prev_sid and is_valid_session_id(_prev_sid):
                 st.session_state["session_id"]        = _prev_sid
+                st.query_params["sid"] = _prev_sid   # altfel ?sid= vechi din URL redeschide conversația anterioară
                 st.session_state["messages"]          = _prev_msg
                 st.session_state["materie_selectata"] = _prev_mat
                 st.session_state["_detected_subject"] = _prev_det
@@ -7702,6 +7742,7 @@ with st.sidebar:
                 _new_main_sid = generate_unique_session_id()
                 register_session(_new_main_sid)
                 st.session_state["session_id"]        = _new_main_sid
+                st.query_params["sid"] = _new_main_sid   # altfel ?sid= vechi din URL redeschide conversația anterioară
                 st.session_state["messages"]          = []
                 st.session_state["materie_selectata"] = None
                 st.session_state.pop("_detected_subject", None)
@@ -8735,7 +8776,16 @@ if st.session_state.get("_suggested_question"):
     _materie_manuala = st.session_state.get("materie_selectata")
     _mod_automat = (_materie_manuala is None)
 
-    if not _mod_automat:
+    # Sfaturi de studiu / Orientare Specializare: au propriul ghid; materia rămasă selectată
+    # din conversația anterioară NU trebuie să-l înlocuiască (înainte, cu o materie aleasă,
+    # primul mesaj din Orientare primea promptul materiei, nu ghidul de specializări).
+    _mod_special = ("orientare_specializare" if st.session_state.get("orientare_mode")
+                    else "pedagogie" if st.session_state.get("pedagogie_mode") else None)
+
+    if _mod_special:
+        if st.session_state.get("_detected_subject") != _mod_special or not st.session_state.get("system_prompt"):
+            update_system_prompt_for_subject(_mod_special)
+    elif not _mod_automat:
         if st.session_state.get("_detected_subject") != _materie_manuala:
             update_system_prompt_for_subject(_materie_manuala)
     else:
@@ -9339,7 +9389,17 @@ if user_input := st.chat_input("Întreabă profesorul..."):
         and text_file_content  # fișierul chiar a fost încărcat și extras
     )
 
-    if not _mod_automat:
+
+    # Sfaturi de studiu / Orientare Specializare: au propriul ghid; materia rămasă selectată
+    # din conversația anterioară NU trebuie să-l înlocuiască (înainte, cu o materie aleasă,
+    # primul mesaj din Orientare primea promptul materiei, nu ghidul de specializări).
+    _mod_special = ("orientare_specializare" if st.session_state.get("orientare_mode")
+                    else "pedagogie" if st.session_state.get("pedagogie_mode") else None)
+
+    if _mod_special:
+        if st.session_state.get("_detected_subject") != _mod_special or not st.session_state.get("system_prompt"):
+            update_system_prompt_for_subject(_mod_special)
+    elif not _mod_automat:
         # Mod manual: selectorul are prioritate — asigurăm prompt-ul corect
         if st.session_state.get("_detected_subject") != _materie_manuala:
             update_system_prompt_for_subject(_materie_manuala)
