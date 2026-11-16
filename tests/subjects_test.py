@@ -38,9 +38,12 @@ at = AppTest.from_file("app_under_test.py", default_timeout=90)
 at.query_params["sid"] = "c" * 64; at.session_state["_browser_storage"] = {}
 at.run()
 assert not at.exception, [e.value for e in at.exception]
-labels = [b.label for b in at.button]
-ok(any("Sisteme de Operare 1" in l for l in labels) and any("Modele SPICE" in l for l in labels),
-   "pagina de start are butoane pentru materiile noi")
+labels_i = [b.label for b in at.button]
+at.radio(key="an_studiu").set_value("II").run()
+labels_ii = [b.label for b in at.button]
+ok(any("Sisteme de Operare 1" in l for l in labels_i) and any("Modele SPICE" in l for l in labels_ii),
+   "pagina de start are butoane pentru materiile noi (Anul I / Anul II)")
+at.radio(key="an_studiu").set_value("I").run()
 btn = at.button(key="pick_mat_sisteme de operare")
 btn.click().run()
 assert not at.exception, [e.value for e in at.exception]

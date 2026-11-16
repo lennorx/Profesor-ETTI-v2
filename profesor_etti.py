@@ -1233,6 +1233,7 @@ _SETARI_BOOL_KEYS = ("pas_cu_pas", "mod_strategie", "mod_avansat", "mod_bac_inte
 def _current_setari() -> dict:
     d = {k: bool(st.session_state.get(k, False)) for k in _SETARI_BOOL_KEYS}
     d["materie_selectata"] = st.session_state.get("materie_selectata")
+    d["an_studiu"] = st.session_state.get("an_studiu", "I")
     return d
 
 
@@ -1243,6 +1244,8 @@ def _apply_setari(setari: dict):
     if _mat is not None and _mat not in MATERII.values():
         _mat = None
     st.session_state["materie_selectata"] = _mat
+    _an = setari.get("an_studiu")
+    st.session_state["an_studiu"] = _an if _an in ("I", "II") else (MATERIE_AN.get(_mat) or "I")
     if _mat:
         st.session_state["_detected_subject"] = _mat
     elif setari.get("pedagogie_mode"):
@@ -2642,7 +2645,7 @@ if _opt_raw:
     except Exception:
         _opt = None
     if isinstance(_opt, dict):
-        _opt = {k: v for k, v in _opt.items() if k in _SETARI_BOOL_KEYS + ("materie_selectata",)}
+        _opt = {k: v for k, v in _opt.items() if k in _SETARI_BOOL_KEYS + ("materie_selectata", "an_studiu")}
         _opt["pedagogie_mode"] = _opt["orientare_mode"] = False
         st.session_state["_pending_new_tab_opt"] = _opt
 update_session_activity(session_id)
@@ -3061,6 +3064,15 @@ MATERII = {
     "🛠️ Tehnici CAD pentru Module Electronice / Tehnologii de Interconectare (An II, opțional)": "tehnici cad pentru module electronice",
     "☕ Programare Orientată pe Obiecte — Java / Android (An II, opțional)": "programare orientată pe obiecte",
 }
+
+# Anul de studiu al fiecărei materii, din eticheta ei: „(An I…” / „(An II…”.
+# Pagina principală și selectorul din bară arată doar materiile anului ales (comutatorul „Anul I / Anul II”).
+def _an_din_eticheta(label: str):
+    m = re.search(r"\(An (II|I)\b", label)
+    return m.group(1) if m else None
+
+
+MATERIE_AN = {cod: _an_din_eticheta(label) for label, cod in MATERII.items() if cod}
 # NOTĂ: la finalul anului II, disciplinele se ramifică pe specializare (ELA/TST/RST/MON/INF).
 # Se adaugă blocurile aferente în MATERII + _PROMPT_SUBJECTS pe măsură ce studentul avansează.
 
@@ -7419,8 +7431,18 @@ with st.sidebar:
 
     # --- Selector materie ---
     st.subheader("📚 Materie")
-    _materii_keys = list(MATERII.keys())
     _mat_saved = st.session_state.get("materie_selectata")
+    if st.session_state.get("an_studiu") not in ("I", "II"):
+        st.session_state["an_studiu"] = MATERIE_AN.get(_mat_saved) or "I"
+    st.radio(
+        "An de studiu", options=["I", "II"], key="an_studiu", horizontal=True,
+        format_func=lambda a: f"Anul {a}", label_visibility="collapsed",
+        help="Arată doar materiile anului ales (pe pagina principală și în lista de mai jos).",
+    )
+    _an_ales = st.session_state["an_studiu"]
+    # Automat + materiile anului ales; materia deja aleasă rămâne în listă chiar dacă e din celălalt an
+    _materii_keys = [k for k, v in MATERII.items()
+                     if v is None or MATERIE_AN.get(v) == _an_ales or v == _mat_saved]
     _mat_default_idx = next(
         (i for i, k in enumerate(_materii_keys) if MATERII[k] == _mat_saved),
         0  # fallback la "🤖 Automat" dacă nu găsim
@@ -9149,8 +9171,10 @@ if not st.session_state.get("messages") and not st.session_state.get("pedagogie_
 
     if materie_curenta is None:
         # Mod Automat — afișăm selector de materie pe pagina principală
-        st.markdown("##### 📚 Selectează materia")
-        _materii_butoane = [(k, v) for k, v in MATERII.items() if v is not None]
+        _an_ales = st.session_state.get("an_studiu", "I")
+        st.markdown(f"##### 📚 Selectează materia — Anul {_an_ales}")
+        st.caption("Schimbi anul din bara din stânga (📚 Materie → Anul I / Anul II).")
+        _materii_butoane = [(k, v) for k, v in MATERII.items() if v is not None and MATERIE_AN.get(v) == _an_ales]
         _cols = st.columns(2)
         for i, (label, cod) in enumerate(_materii_butoane):
             with _cols[i % 2]:

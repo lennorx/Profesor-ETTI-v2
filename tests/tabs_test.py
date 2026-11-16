@@ -130,3 +130,27 @@ f.button(key="_resend_last").click().run(); chk(f)
 msgs = f.session_state["messages"]
 ok(len(SEEN) == n + 1 and [m["role"] for m in msgs] == ["user", "assistant"],
    "„Trimite din nou”: același mesaj, o singură dată, cu răspuns")
+
+# ── Comutatorul „Anul I / Anul II” (bara din stânga) ──
+Y = "a5" * 32
+y = AppTest.from_file("app_under_test.py", default_timeout=90)
+y.query_params["sid"] = Y; y.session_state["_browser_storage"] = {}
+y.run(); chk(y)
+keys = lambda: {x.key for x in y.button if (x.key or "").startswith("pick_mat_")}
+ok("pick_mat_analiză matematică" in keys() and "pick_mat_baze de date" not in keys(),
+   "implicit Anul I: pe pagina principală doar materiile din anul I")
+opts = y.selectbox[0].options
+ok(any("Analiză Matematică" in o for o in opts) and not any("Baze de Date" in o for o in opts)
+   and any("Automat" in o for o in opts), "selectorul din bară arată Automat + materiile anului I")
+y.radio(key="an_studiu").set_value("II").run(); chk(y)
+ok("pick_mat_baze de date" in keys() and "pick_mat_analiză matematică" not in keys(),
+   "Anul II: pe pagina principală doar materiile din anul II")
+ok((row(Y).get("setari") or {}).get("an_studiu") == "II", "anul ales e salvat pe conversație")
+z = AppTest.from_file("app_under_test.py", default_timeout=90)
+z.query_params["sid"] = Y; z.session_state["_browser_storage"] = {}
+z.run(); chk(z)
+ok(z.session_state["an_studiu"] == "II", "la redeschidere conversația revine pe anul ales")
+y.button(key="pick_mat_baze de date").click().run(); chk(y)
+y.radio(key="an_studiu").set_value("I").run(); chk(y)
+ok(y.session_state["materie_selectata"] == "baze de date" and any("Baze de Date" in o for o in y.selectbox[0].options),
+   "schimbarea anului nu schimbă materia conversației deja aleasă")
